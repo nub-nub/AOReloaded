@@ -16,6 +16,7 @@
 #include "core/logging.h"
 #include "ao/game_api.h"
 #include "ao/dvalue_dump.h"
+#include "hooks/camera_hook.h"
 
 #include <windows.h>
 
@@ -62,6 +63,11 @@ DWORD WINAPI DeferredInit(LPVOID /*param*/) {
     aor::GameAPI::RegisterBool("AOR_TestToggle", true);
     aor::GameAPI::RegisterInt("AOR_TestSlider", 50);
 
+    // Camera system DValues.
+    // Names must be ≤ 15 chars (AOString SSO limit).
+    aor::GameAPI::RegisterBool("AOR_CamOn", true);
+    aor::GameAPI::RegisterInt("AOR_CYawSpd", 2);
+
     // Wait for game world.
     aor::Log("[init] waiting for game world...");
     for (int i = 0; i < 600; ++i) {
@@ -71,6 +77,11 @@ DWORD WINAPI DeferredInit(LPVOID /*param*/) {
 
     if (aor::GameAPI::Exists("camera_mode")) {
         aor::Log("[init] game world detected!");
+
+        // Install camera hooks now that GUI.dll and N3.dll are loaded.
+        if (!aor::InitCameraHooks()) {
+            aor::Log("[init] camera hooks failed — running without camera mod");
+        }
     } else {
         aor::Log("[init] timed out waiting for game world");
     }

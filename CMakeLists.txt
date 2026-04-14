@@ -35,6 +35,8 @@ add_library(AOReloaded SHARED
     src/core/logging.cpp
     src/ao/game_api.cpp
     src/ao/dvalue_dump.cpp
+    src/hooks/hook_engine.cpp
+    src/hooks/camera_hook.cpp
 )
 
 set_target_properties(AOReloaded PROPERTIES

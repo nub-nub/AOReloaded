@@ -1,0 +1,310 @@
+// camera_hook.cpp — WoW-style camera: auto-follow behind character during movement.
+//
+// LMB drag orbits camera. On release, camera stays at new angle.
+// When the character moves, camera gradually lerps back behind the character.
+// When stationary, camera stays wherever you left it.
+//
+// Implementation: hook CameraVehicleFixedThird_t::CalcSteering (per-frame).
+// Before the original steering runs, check if the player is moving. If so,
+// lerp the camera heading direction toward "behind the character" using the
+// player's facing quaternion. The original CalcSteering then steers toward
+// the updated heading naturally.
+
+#include "hooks/camera_hook.h"
+#include "hooks/hook_engine.h"
+#include "ao/game_api.h"
+#include "core/logging.h"
+
+#include <windows.h>
+#include <cstdint>
+#include <cmath>
+
+namespace aor {
+
+// ── N3.dll API ──────────────────────────────────────────────────────────
+
+namespace N3API {
+
+using FnGetEngineInstance    = void*(__cdecl*)();
+using FnGetActiveCamera      = void*(__thiscall*)(void* engine);
+using FnIsFirstPerson        = bool(__thiscall*)(void* camera);
+using FnGetClientControlDynel = void*(__thiscall*)(void* engine);
+
+// GetGlobalPos returns const Vector3_t& (pointer in EAX).
+using FnGetGlobalPos = float*(__thiscall*)(void* dynel);
+
+static FnGetEngineInstance     GetEngineInstance     = nullptr;
+static FnGetActiveCamera       GetActiveCamera       = nullptr;
+static FnIsFirstPerson         IsFirstPerson         = nullptr;
+static FnGetClientControlDynel GetClientControlDynel = nullptr;
+static FnGetGlobalPos          GetGlobalPos          = nullptr;
+
+static bool Init() {
+    HMODULE n3 = GetModuleHandleA("N3.dll");
+    if (!n3) {
+        Log("[camera] N3.dll not loaded");
+        return false;
+    }
+    Log("[camera] N3.dll at %p", n3);
+
+    auto resolve = [&](const char* mangled, void** out, const char* name) -> bool {
+        *out = reinterpret_cast<void*>(GetProcAddress(n3, mangled));
+        if (!*out) {
+            Log("[camera] FAILED to resolve %s", name);
+            return false;
+        }
+        Log("[camera] resolved %s -> %p", name, *out);
+        return true;
+    };
+
+    bool ok = true;
+    ok &= resolve("?GetInstance@n3EngineClient_t@@SAPAV1@XZ",
+        reinterpret_cast<void**>(&GetEngineInstance), "GetInstance");
+    ok &= resolve("?GetActiveCamera@n3EngineClient_t@@QBEPAVn3Camera_t@@XZ",
+        reinterpret_cast<void**>(&GetActiveCamera), "GetActiveCamera");
+    ok &= resolve("?IsFirstPerson@n3Camera_t@@QBE_NXZ",
+        reinterpret_cast<void**>(&IsFirstPerson), "IsFirstPerson");
+    ok &= resolve("?GetClientControlDynel@n3EngineClient_t@@QBEPAVn3VisualDynel_t@@XZ",
+        reinterpret_cast<void**>(&GetClientControlDynel), "GetClientControlDynel");
+    ok &= resolve("?GetGlobalPos@n3Dynel_t@@QBEABVVector3_t@@XZ",
+        reinterpret_cast<void**>(&GetGlobalPos), "GetGlobalPos");
+    return ok;
+}
+
+}  // namespace N3API
+
+// ── Math helpers ────────────────────────────────────────────────────────
+
+static float Vec3LenXZ(float x, float z) {
+    return std::sqrt(x * x + z * z);
+}
+
+// ── CalcSteering hook ───────────────────────────────────────────────────
+//
+// CameraVehicleFixedThird_t::CalcSteering (N3.dll RVA 0x1f752)
+// __thiscall, RET 4 (one stack param: Vector3_t& result)
+//
+// Called every frame for 3rd person camera. We inject yaw follow logic
+// before the original steering computation.
+
+constexpr uint32_t kCalcSteeringRVA = 0x0001f752;
+
+using FnCalcSteering = int(__thiscall*)(void* vehicle, void* result);
+static FnCalcSteering g_origCalcSteering = nullptr;
+
+// Per-frame state for movement detection.
+static float g_lastPlayerX = 0.0f;
+static float g_lastPlayerZ = 0.0f;
+static bool  g_hasLastPos  = false;
+static int   g_frameCount  = 0;
+
+// Default follow speed (DValue overridable).
+constexpr float kDefaultFollowSpeed = 2.0f;
+
+// Minimum movement per frame to count as "moving" (in world units).
+constexpr float kMovementThreshold = 0.01f;
+
+static int __fastcall CalcSteeringDetour(void* vehicle, void* /*edx*/, void* result) {
+    ++g_frameCount;
+    bool verbose = (g_frameCount <= 5);
+
+    // Get engine + player dynel.
+    void* engine = N3API::GetEngineInstance ? N3API::GetEngineInstance() : nullptr;
+    if (!engine) goto call_original;
+
+    // Check master toggle.
+    {
+        AOVariant enabled{};
+        if (GameAPI::GetVariant("AOR_CamOn", enabled) &&
+            enabled.type == static_cast<uint32_t>(VariantType::Bool) &&
+            !enabled.as_bool) {
+            goto call_original;
+        }
+    }
+
+    {
+        void* dynel = N3API::GetClientControlDynel(engine);
+        if (!dynel) goto call_original;
+
+        // Get player position.
+        float* pos = N3API::GetGlobalPos(dynel);
+        if (!pos) goto call_original;
+
+        float px = pos[0];
+        float pz = pos[2];
+
+        if (!g_hasLastPos) {
+            g_lastPlayerX = px;
+            g_lastPlayerZ = pz;
+            g_hasLastPos = true;
+            goto call_original;
+        }
+
+        // Compute movement distance in XZ plane.
+        float dx = px - g_lastPlayerX;
+        float dz = pz - g_lastPlayerZ;
+        float moveDist = Vec3LenXZ(dx, dz);
+
+        g_lastPlayerX = px;
+        g_lastPlayerZ = pz;
+
+        // Log every ~60 frames (roughly once per second) while moving.
+        bool logThis = (g_frameCount % 60 == 0) || verbose;
+
+        if (logThis) {
+            Log("[camera] frame %d: pos=(%.2f,%.2f) delta=(%.4f,%.4f) dist=%.4f",
+                g_frameCount,
+                static_cast<double>(px), static_cast<double>(pz),
+                static_cast<double>(dx), static_cast<double>(dz),
+                static_cast<double>(moveDist));
+        }
+
+        // Only follow when character is moving.
+        if (moveDist < kMovementThreshold) goto call_original;
+
+        // Don't follow while LMB is held (player is orbiting camera).
+        if (GetAsyncKeyState(VK_LBUTTON) & 0x8000) goto call_original;
+
+        // "Behind" direction = opposite of movement direction (world space).
+        float behindX = -dx;
+        float behindZ = -dz;
+
+        // Normalize.
+        float behindLen = Vec3LenXZ(behindX, behindZ);
+        if (behindLen < 0.001f) goto call_original;
+        behindX /= behindLen;
+        behindZ /= behindLen;
+
+        auto base = reinterpret_cast<uintptr_t>(vehicle);
+
+        // RecalcOptimalPos rotates heading by the quaternion at vehicle+0x16c
+        // before using it (when rotFlag at +0x204 is set). We must apply the
+        // INVERSE rotation to our world-space behind direction so that after
+        // RecalcOptimalPos rotates it forward, the result is correct.
+        // The quaternion is a pure Y-axis rotation: (0, qy, 0, qw).
+        float qy = *reinterpret_cast<float*>(base + 0x170);
+        float qw = *reinterpret_cast<float*>(base + 0x178);
+        // cos(θ) = qw² - qy², sin(θ) = 2*qy*qw
+        float cosTheta = qw * qw - qy * qy;
+        float sinTheta = 2.0f * qy * qw;
+        // Compensating Y-rotation: x' = x*cos - z*sin, z' = x*sin + z*cos
+        float localBehindX = behindX * cosTheta - behindZ * sinTheta;
+        float localBehindZ = behindX * sinTheta + behindZ * cosTheta;
+        behindX = localBehindX;
+        behindZ = localBehindZ;
+
+        // Re-normalize after rotation (should be unit length, but be safe).
+        behindLen = Vec3LenXZ(behindX, behindZ);
+        if (behindLen < 0.001f) goto call_original;
+        behindX /= behindLen;
+        behindZ /= behindLen;
+
+        // Read current camera heading from vehicle+0x1F8 (3D direction vector).
+        float* headingX = reinterpret_cast<float*>(base + 0x1F8);
+        float* headingY = reinterpret_cast<float*>(base + 0x1FC);
+        float* headingZ = reinterpret_cast<float*>(base + 0x200);
+
+        // Read delta time from engine+0x68.
+        float dt = *reinterpret_cast<float*>(
+            reinterpret_cast<uintptr_t>(engine) + 0x68);
+
+        // Follow speed — read from DValue or use default.
+        float followSpeed = kDefaultFollowSpeed;
+        AOVariant speedVal{};
+        if (GameAPI::GetVariant("AOR_CYawSpd", speedVal)) {
+            if (speedVal.type == static_cast<uint32_t>(VariantType::Float))
+                followSpeed = speedVal.as_float;
+            else if (speedVal.type == static_cast<uint32_t>(VariantType::Int))
+                followSpeed = static_cast<float>(speedVal.as_int);
+        }
+
+        float t = dt * followSpeed;
+        if (t > 1.0f) t = 1.0f;
+
+        // Lerp heading XZ toward behind direction. Preserve Y (pitch).
+        float newX = *headingX + (behindX - *headingX) * t;
+        float newZ = *headingZ + (behindZ - *headingZ) * t;
+
+        // Renormalize XZ while preserving the original XZ:Y ratio.
+        float newLenXZ = Vec3LenXZ(newX, newZ);
+        float oldLenXZ = Vec3LenXZ(*headingX, *headingZ);
+        if (newLenXZ > 0.001f && oldLenXZ > 0.001f) {
+            float scale = oldLenXZ / newLenXZ;
+            *headingX = newX * scale;
+            *headingZ = newZ * scale;
+            // headingY unchanged — preserves pitch.
+        }
+
+        if (logThis) {
+            Log("[camera]   behind=(%.3f,%.3f) heading=(%.3f,%.3f,%.3f) dt=%.4f t=%.4f",
+                static_cast<double>(behindX),
+                static_cast<double>(behindZ),
+                static_cast<double>(*headingX),
+                static_cast<double>(*headingY),
+                static_cast<double>(*headingZ),
+                static_cast<double>(dt),
+                static_cast<double>(t));
+        }
+    }
+
+call_original:
+    int ret = g_origCalcSteering(vehicle, result);
+
+    // Log the FINAL state AFTER RecalcOptimalPos ran.
+    if ((g_frameCount % 60 == 0) || (g_frameCount <= 5)) {
+        auto base = reinterpret_cast<uintptr_t>(vehicle);
+        float hx = *reinterpret_cast<float*>(base + 0x1F8);
+        float hy = *reinterpret_cast<float*>(base + 0x1FC);
+        float hz = *reinterpret_cast<float*>(base + 0x200);
+        float ox = *reinterpret_cast<float*>(base + 0x1EC);
+        float oy = *reinterpret_cast<float*>(base + 0x1F0);
+        float oz = *reinterpret_cast<float*>(base + 0x1F4);
+        // Check the rotation flag and quaternion at +0x16c that RecalcOptimalPos uses.
+        uint8_t rotFlag = *reinterpret_cast<uint8_t*>(base + 0x204);
+        float qx = *reinterpret_cast<float*>(base + 0x16C);
+        float qy = *reinterpret_cast<float*>(base + 0x170);
+        float qz = *reinterpret_cast<float*>(base + 0x174);
+        float qw = *reinterpret_cast<float*>(base + 0x178);
+        Log("[camera]   POST heading=(%.3f,%.3f,%.3f) optPos=(%.1f,%.1f,%.1f) "
+            "rotFlag=%d quat=(%.3f,%.3f,%.3f,%.3f)",
+            static_cast<double>(hx), static_cast<double>(hy), static_cast<double>(hz),
+            static_cast<double>(ox), static_cast<double>(oy), static_cast<double>(oz),
+            rotFlag,
+            static_cast<double>(qx), static_cast<double>(qy),
+            static_cast<double>(qz), static_cast<double>(qw));
+    }
+
+    return ret;
+}
+
+// ── Public init ─────────────────────────────────────────────────────────
+
+bool InitCameraHooks() {
+    if (!N3API::Init()) {
+        Log("[camera] N3 API init failed — camera hooks disabled");
+        return false;
+    }
+
+    // Hook CalcSteering on CameraVehicleFixedThird_t.
+    void* calcSteeringAddr = ResolveRVA("N3.dll", kCalcSteeringRVA);
+    if (!calcSteeringAddr) {
+        Log("[camera] N3.dll CalcSteering RVA invalid");
+        return false;
+    }
+    auto* bytes = static_cast<uint8_t*>(calcSteeringAddr);
+    Log("[camera] CalcSteering at %p, prologue: %02X %02X %02X %02X %02X",
+        calcSteeringAddr, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4]);
+
+    void* trampoline = nullptr;
+    if (!InstallHook(calcSteeringAddr, reinterpret_cast<void*>(&CalcSteeringDetour),
+                     &trampoline)) {
+        Log("[camera] failed to hook CalcSteering");
+        return false;
+    }
+    g_origCalcSteering = reinterpret_cast<FnCalcSteering>(trampoline);
+
+    Log("[camera] CalcSteering hook installed — yaw follow active");
+    return true;
+}
+
+}  // namespace aor
