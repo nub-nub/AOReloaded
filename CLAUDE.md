@@ -75,6 +75,15 @@ The game's options panel is pure data-driven XML at `client/cd_image/gui/Default
 - AddVariable: registers custom DValues that game's option widgets bind to
 - DValue dump: walked all 268 entries from global std::map tree
 - Options panel: AOReloaded tab appears in F10 settings with working test widgets
+- **Inline hook engine** (`src/hooks/hook_engine.cpp`): 5-byte `jmp rel32` over verified prologues. Supports the standard hot-patch prologue plus several MSVC frame-prologues (`55 8B EC 51 5x`, etc.). Trampoline preserves callee-cleanup conventions (e.g. `RET 4`).
+- **CalcSteering hook** on `CameraVehicleFixedThird_t` (N3.dll RVA `0x1f752`): per-frame yaw-follow active, lerps the heading vector at `vehicle+0x1F8` toward "behind character" using angle-based interpolation. LMB-held detected via `GetAsyncKeyState(VK_LBUTTON)`. See `src/hooks/camera_hook.cpp`.
+- **Options panel SSO limit**: DValue names bound to `OptionCheckBox`/`OptionSlider` MUST be ≤ 15 chars. `AOString::FromShort` silently returns an empty string for longer names, which corrupts the registry and hangs the slider widget. Sliders also expect Int (not Float) DValues — Float-bound sliders render with no knob and hang on click.
+
+## Caveats / footguns
+
+- DValue name length: see SSO limit above. If a slider hangs the game on click, suspect this first.
+- Detour calling conventions: hooked `__thiscall` methods need a detour with `__fastcall` signature (`ECX`=this, `EDX`=junk). The trampoline must keep the original `__thiscall` typing or `RET N` cleanup will mis-balance the stack.
+- `RecalcOptimalPos` rotates the heading at `vehicle+0x1F8` by the character-yaw quaternion at `vehicle+0x16c` before computing the optimal camera position. Writing to `+0x1F8` in **world space** produces wrong directions; instead, write the **local-space** target (e.g. local "behind" is the constant `(0, 0, -1)`) and let the rotation produce world-space output.
 
 ## Documentation Maintenance
 

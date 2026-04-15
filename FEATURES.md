@@ -10,7 +10,10 @@ Client mod for Anarchy Online. Drop `version.dll` into your client directory and
 
 ## Features
 
-*No user-facing features yet — framework is operational, features coming soon.*
+### WoW-style Camera Auto-Follow
+In 3rd person, the camera smoothly returns to a position behind your character whenever you move (and you're not holding LMB). LMB-drag still orbits the camera freely; on release it stays put until you start moving again. The "behind" position is based on which way your character is facing, so walking backwards or strafing won't flip the camera around.
+
+**Config:** Options panel (F10) → **AOReloaded** tab → **Camera** → "WoW-style camera (auto-recenter after LMB drag)". Lerp speed is controlled by the `AOR_CYawSpd` DValue (default 5; higher = snappier follow).
 
 <!-- 
 Template for adding features:
