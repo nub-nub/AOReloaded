@@ -85,6 +85,12 @@ The game's options panel is pure data-driven XML at `client/cd_image/gui/Default
 - Detour calling conventions: hooked `__thiscall` methods need a detour with `__fastcall` signature (`ECX`=this, `EDX`=junk). The trampoline must keep the original `__thiscall` typing or `RET N` cleanup will mis-balance the stack.
 - `RecalcOptimalPos` rotates the heading at `vehicle+0x1F8` by the character-yaw quaternion at `vehicle+0x16c` before computing the optimal camera position. Writing to `+0x1F8` in **world space** produces wrong directions; instead, write the **local-space** target (e.g. local "behind" is the constant `(0, 0, -1)`) and let the rotation produce world-space output.
 
+## Graphics Research
+
+Deep-dive notes on the client's rendering/lighting/asset systems live in `docs/graphics/`:
+- `shadows_lighting.md` — three-light-bank forward renderer, drop-shadow model, day/night (base-game), AOReloaded possibilities
+- `textures.md` — `rdb.db` is SQLite3 with JPEG/PNG texture blobs in tables `rdb_1010004/08/09/16/17/23/24`. `ldb.dll` is *localisation text*, not textures. Upscaling feasibility tiers.
+
 ## Documentation Maintenance
 
 When implementing a new feature:
