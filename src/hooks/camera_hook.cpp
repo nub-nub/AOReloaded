@@ -102,7 +102,6 @@ static FnCalcSteering g_origCalcSteering = nullptr;
 static float g_lastPlayerX = 0.0f;
 static float g_lastPlayerZ = 0.0f;
 static bool  g_hasLastPos  = false;
-static int   g_frameCount  = 0;
 
 // Edge-detection for RMB-align (character → camera facing on RMB press).
 static bool  g_rmbWasHeld  = false;
@@ -114,9 +113,6 @@ constexpr float kDefaultFollowSpeed = 5.0f;
 constexpr float kMovementThreshold = 0.01f;
 
 static int __fastcall CalcSteeringDetour(void* vehicle, void* /*edx*/, void* result) {
-    ++g_frameCount;
-    bool verbose = (g_frameCount <= 5);
-
     // Get engine + player dynel.
     void* engine = N3API::GetEngineInstance ? N3API::GetEngineInstance() : nullptr;
     if (!engine) goto call_original;
@@ -220,17 +216,6 @@ static int __fastcall CalcSteeringDetour(void* vehicle, void* /*edx*/, void* res
         g_lastPlayerX = px;
         g_lastPlayerZ = pz;
 
-        // Log every ~60 frames (roughly once per second) while moving.
-        bool logThis = (g_frameCount % 60 == 0) || verbose;
-
-        if (logThis) {
-            Log("[camera] frame %d: pos=(%.2f,%.2f) delta=(%.4f,%.4f) dist=%.4f",
-                g_frameCount,
-                static_cast<double>(px), static_cast<double>(pz),
-                static_cast<double>(dx), static_cast<double>(dz),
-                static_cast<double>(moveDist));
-        }
-
         // Only follow when character is moving.
         if (moveDist < kMovementThreshold) goto call_original;
 
@@ -287,17 +272,6 @@ static int __fastcall CalcSteeringDetour(void* vehicle, void* /*edx*/, void* res
         *headingX = std::cos(newAngle) * oldLenXZ;
         *headingZ = std::sin(newAngle) * oldLenXZ;
         // headingY unchanged — preserves pitch.
-
-        if (logThis) {
-            Log("[camera]   behind=(%.3f,%.3f) heading=(%.3f,%.3f,%.3f) dt=%.4f t=%.4f",
-                static_cast<double>(behindX),
-                static_cast<double>(behindZ),
-                static_cast<double>(*headingX),
-                static_cast<double>(*headingY),
-                static_cast<double>(*headingZ),
-                static_cast<double>(dt),
-                static_cast<double>(t));
-        }
     }
 
 call_original:
