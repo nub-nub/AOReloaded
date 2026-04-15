@@ -99,7 +99,7 @@ static bool  g_hasLastPos  = false;
 static int   g_frameCount  = 0;
 
 // Default follow speed (DValue overridable).
-constexpr float kDefaultFollowSpeed = 2.0f;
+constexpr float kDefaultFollowSpeed = 5.0f;
 
 // Minimum movement per frame to count as "moving" (in world units).
 constexpr float kMovementThreshold = 0.01f;
@@ -165,39 +165,15 @@ static int __fastcall CalcSteeringDetour(void* vehicle, void* /*edx*/, void* res
         // Don't follow while LMB is held (player is orbiting camera).
         if (GetAsyncKeyState(VK_LBUTTON) & 0x8000) goto call_original;
 
-        // "Behind" direction = opposite of movement direction (world space).
-        float behindX = -dx;
-        float behindZ = -dz;
-
-        // Normalize.
-        float behindLen = Vec3LenXZ(behindX, behindZ);
-        if (behindLen < 0.001f) goto call_original;
-        behindX /= behindLen;
-        behindZ /= behindLen;
-
         auto base = reinterpret_cast<uintptr_t>(vehicle);
 
-        // RecalcOptimalPos rotates heading by the quaternion at vehicle+0x16c
-        // before using it (when rotFlag at +0x204 is set). We must apply the
-        // INVERSE rotation to our world-space behind direction so that after
-        // RecalcOptimalPos rotates it forward, the result is correct.
-        // The quaternion is a pure Y-axis rotation: (0, qy, 0, qw).
-        float qy = *reinterpret_cast<float*>(base + 0x170);
-        float qw = *reinterpret_cast<float*>(base + 0x178);
-        // cos(θ) = qw² - qy², sin(θ) = 2*qy*qw
-        float cosTheta = qw * qw - qy * qy;
-        float sinTheta = 2.0f * qy * qw;
-        // Compensating Y-rotation: x' = x*cos - z*sin, z' = x*sin + z*cos
-        float localBehindX = behindX * cosTheta - behindZ * sinTheta;
-        float localBehindZ = behindX * sinTheta + behindZ * cosTheta;
-        behindX = localBehindX;
-        behindZ = localBehindZ;
-
-        // Re-normalize after rotation (should be unit length, but be safe).
-        behindLen = Vec3LenXZ(behindX, behindZ);
-        if (behindLen < 0.001f) goto call_original;
-        behindX /= behindLen;
-        behindZ /= behindLen;
+        // "Behind the character" in the heading's local space is always (0, -1).
+        // RecalcOptimalPos rotates heading by the character yaw quaternion at
+        // vehicle+0x16c, so local (0, -1) becomes world-space "behind character".
+        // This means direction is based on character FACING, not movement direction
+        // — walking backwards won't flip the camera.
+        float behindX = 0.0f;
+        float behindZ = -1.0f;
 
         // Read current camera heading from vehicle+0x1F8 (3D direction vector).
         float* headingX = reinterpret_cast<float*>(base + 0x1F8);
@@ -221,19 +197,24 @@ static int __fastcall CalcSteeringDetour(void* vehicle, void* /*edx*/, void* res
         float t = dt * followSpeed;
         if (t > 1.0f) t = 1.0f;
 
-        // Lerp heading XZ toward behind direction. Preserve Y (pitch).
-        float newX = *headingX + (behindX - *headingX) * t;
-        float newZ = *headingZ + (behindZ - *headingZ) * t;
-
-        // Renormalize XZ while preserving the original XZ:Y ratio.
-        float newLenXZ = Vec3LenXZ(newX, newZ);
+        // Angle-based lerp — uniform angular speed and correct shortest-path
+        // for any angular distance (including near-180° where vector lerp
+        // collapses to near-zero direction changes).
         float oldLenXZ = Vec3LenXZ(*headingX, *headingZ);
-        if (newLenXZ > 0.001f && oldLenXZ > 0.001f) {
-            float scale = oldLenXZ / newLenXZ;
-            *headingX = newX * scale;
-            *headingZ = newZ * scale;
-            // headingY unchanged — preserves pitch.
-        }
+        if (oldLenXZ < 0.001f) goto call_original;
+
+        float currentAngle = std::atan2(*headingZ, *headingX);
+        float targetAngle  = std::atan2(behindZ, behindX);
+        float diff = targetAngle - currentAngle;
+        // Wrap to [-π, π] so we always rotate the short way.
+        constexpr float kPi = 3.14159265358979323846f;
+        if (diff >  kPi) diff -= 2.0f * kPi;
+        if (diff < -kPi) diff += 2.0f * kPi;
+
+        float newAngle = currentAngle + diff * t;
+        *headingX = std::cos(newAngle) * oldLenXZ;
+        *headingZ = std::sin(newAngle) * oldLenXZ;
+        // headingY unchanged — preserves pitch.
 
         if (logThis) {
             Log("[camera]   behind=(%.3f,%.3f) heading=(%.3f,%.3f,%.3f) dt=%.4f t=%.4f",
