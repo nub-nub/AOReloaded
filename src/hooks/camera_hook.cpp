@@ -33,11 +33,15 @@ using FnGetClientControlDynel = void*(__thiscall*)(void* engine);
 // GetGlobalPos returns const Vector3_t& (pointer in EAX).
 using FnGetGlobalPos = float*(__thiscall*)(void* dynel);
 
+// n3Dynel_t::SetRelRot(Quaternion const&) — writes body rotation via Vehicle_t.
+using FnSetRelRot = void(__thiscall*)(void* dynel, const void* quat);
+
 static FnGetEngineInstance     GetEngineInstance     = nullptr;
 static FnGetActiveCamera       GetActiveCamera       = nullptr;
 static FnIsFirstPerson         IsFirstPerson         = nullptr;
 static FnGetClientControlDynel GetClientControlDynel = nullptr;
 static FnGetGlobalPos          GetGlobalPos          = nullptr;
+static FnSetRelRot             SetRelRot             = nullptr;
 
 static bool Init() {
     HMODULE n3 = GetModuleHandleA("N3.dll");
@@ -68,6 +72,8 @@ static bool Init() {
         reinterpret_cast<void**>(&GetClientControlDynel), "GetClientControlDynel");
     ok &= resolve("?GetGlobalPos@n3Dynel_t@@QBEABVVector3_t@@XZ",
         reinterpret_cast<void**>(&GetGlobalPos), "GetGlobalPos");
+    ok &= resolve("?SetRelRot@n3Dynel_t@@QAEXABVQuaternion_t@@@Z",
+        reinterpret_cast<void**>(&SetRelRot), "SetRelRot");
     return ok;
 }
 
@@ -98,6 +104,9 @@ static float g_lastPlayerZ = 0.0f;
 static bool  g_hasLastPos  = false;
 static int   g_frameCount  = 0;
 
+// Edge-detection for RMB-align (character → camera facing on RMB press).
+static bool  g_rmbWasHeld  = false;
+
 // Default follow speed (DValue overridable).
 constexpr float kDefaultFollowSpeed = 5.0f;
 
@@ -118,7 +127,70 @@ static int __fastcall CalcSteeringDetour(void* vehicle, void* /*edx*/, void* res
         if (GameAPI::GetVariant("AOR_CamOn", enabled) &&
             enabled.type == static_cast<uint32_t>(VariantType::Bool) &&
             !enabled.as_bool) {
+            g_rmbWasHeld = false;  // reset edge detector so disable/enable is clean
             goto call_original;
+        }
+    }
+
+    // ── RMB-align: on RMB press edge, rotate the player dynel so char
+    // faces where the camera is pointing, then reset the camera's local
+    // heading to "directly behind" (preserving pitch). WoW-style: right-
+    // clicking realigns character with camera view instead of dragging
+    // the character+camera offset together.
+    {
+        bool rmbHeld = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
+        bool rmbEdge = rmbHeld && !g_rmbWasHeld;
+        g_rmbWasHeld = rmbHeld;
+
+        if (rmbEdge && N3API::SetRelRot) {
+            auto base = reinterpret_cast<uintptr_t>(vehicle);
+            float hx = *reinterpret_cast<float*>(base + 0x1F8);
+            float hz = *reinterpret_cast<float*>(base + 0x200);
+            float lenXZ = Vec3LenXZ(hx, hz);
+
+            if (lenXZ >= 0.001f) {
+                constexpr float kPi = 3.14159265358979323846f;
+
+                // delta = -π/2 - atan2(hz, hx). See derivation in commit note:
+                // char_forward_world = (sin θ, 0, cos θ); camera look dir in
+                // world = -rotate(local_heading, charQuat). Setting char to
+                // face camera look yields this formula (zero when heading
+                // already points locally "behind" (0, 0, -1)).
+                float beta  = std::atan2(hz, hx);
+                float delta = -kPi * 0.5f - beta;
+                while (delta >  kPi) delta -= 2.0f * kPi;
+                while (delta < -kPi) delta += 2.0f * kPi;
+
+                if (std::fabs(delta) > 0.001f) {
+                    // Char yaw quat at vehicle+0x16C is pure-Y: (0, qy, 0, qw).
+                    float qy = *reinterpret_cast<float*>(base + 0x170);
+                    float qw = *reinterpret_cast<float*>(base + 0x178);
+                    float currentAngle = 2.0f * std::atan2(qy, qw);
+                    float newAngle = currentAngle + delta;
+
+                    struct Q { float x, y, z, w; };
+                    Q newQ{ 0.0f,
+                            std::sin(newAngle * 0.5f),
+                            0.0f,
+                            std::cos(newAngle * 0.5f) };
+
+                    // ORDER MATTERS: reset local heading BEFORE SetRelRot.
+                    // SetRelRot on the player dynel triggers a synchronous
+                    // cascade (locality notify → recompute camera target)
+                    // that reads camera heading × char-yaw. If heading is
+                    // still at its pre-snap offset when that runs, the
+                    // camera gets placed at a doubly-rotated (offset ×
+                    // rotation delta) position for one rendered frame.
+                    // Resetting heading first makes the cascade see the
+                    // correct post-snap state.
+                    *reinterpret_cast<float*>(base + 0x1F8) = 0.0f;
+                    *reinterpret_cast<float*>(base + 0x200) = -lenXZ;
+
+                    if (void* dynel = N3API::GetClientControlDynel(engine)) {
+                        N3API::SetRelRot(dynel, &newQ);
+                    }
+                }
+            }
         }
     }
 
@@ -230,31 +302,6 @@ static int __fastcall CalcSteeringDetour(void* vehicle, void* /*edx*/, void* res
 
 call_original:
     int ret = g_origCalcSteering(vehicle, result);
-
-    // Log the FINAL state AFTER RecalcOptimalPos ran.
-    if ((g_frameCount % 60 == 0) || (g_frameCount <= 5)) {
-        auto base = reinterpret_cast<uintptr_t>(vehicle);
-        float hx = *reinterpret_cast<float*>(base + 0x1F8);
-        float hy = *reinterpret_cast<float*>(base + 0x1FC);
-        float hz = *reinterpret_cast<float*>(base + 0x200);
-        float ox = *reinterpret_cast<float*>(base + 0x1EC);
-        float oy = *reinterpret_cast<float*>(base + 0x1F0);
-        float oz = *reinterpret_cast<float*>(base + 0x1F4);
-        // Check the rotation flag and quaternion at +0x16c that RecalcOptimalPos uses.
-        uint8_t rotFlag = *reinterpret_cast<uint8_t*>(base + 0x204);
-        float qx = *reinterpret_cast<float*>(base + 0x16C);
-        float qy = *reinterpret_cast<float*>(base + 0x170);
-        float qz = *reinterpret_cast<float*>(base + 0x174);
-        float qw = *reinterpret_cast<float*>(base + 0x178);
-        Log("[camera]   POST heading=(%.3f,%.3f,%.3f) optPos=(%.1f,%.1f,%.1f) "
-            "rotFlag=%d quat=(%.3f,%.3f,%.3f,%.3f)",
-            static_cast<double>(hx), static_cast<double>(hy), static_cast<double>(hz),
-            static_cast<double>(ox), static_cast<double>(oy), static_cast<double>(oz),
-            rotFlag,
-            static_cast<double>(qx), static_cast<double>(qy),
-            static_cast<double>(qz), static_cast<double>(qw));
-    }
-
     return ret;
 }
 

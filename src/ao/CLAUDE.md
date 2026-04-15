@@ -81,6 +81,7 @@ The global registry is an `std::map<String, ValueEntry>` backed by a red-black t
 | `?IsFirstPerson@n3Camera_t@@QBE_NXZ` | Checks current camera mode (1st vs 3rd person). |
 | `?ForceUpdatePrefDir@n3Camera_t@@QAEXXZ` | Internally calls `vehicle->ForcedUpdate(false)`. **Does NOT snap behind character** — it just reuses the current camera position as the new preferred direction. |
 | `?ForcedUpdate@CameraVehicleFixedThird_t@@UAEX_N@Z` | Virtual; copies position from `+0x58` to `+0xdc`, calls `UpdateHeadingToPos`, then virtual `+0x98`. |
+| `?SetRelRot@n3Dynel_t@@QAEXABVQuaternion_t@@@Z` | Writes body rotation (forwards to `Vehicle_t::SetRelRot` on `dynel+0x50`). For the unparented local player, rel == global rot. Used by RMB-align to snap character facing to camera look direction. **Has a synchronous side effect** that recomputes camera targeting from `vehicle+0x1F8` × `vehicle+0x16C` — callers snapping both must write the new heading BEFORE invoking this, or the cascade renders one frame of a stale-heading × new-quat position. |
 
 ### `n3Engine_t` instance (engine timing)
 
