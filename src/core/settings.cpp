@@ -327,24 +327,92 @@ static const char kAorXmlBlock[] =
     "    </ScrollViewChild>\n"
     "  </ScrollView>\n";
 
-static bool BuildRootXmlPath(char* out, int outSize) {
-    wchar_t exePath[MAX_PATH] = {};
-    DWORD len = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-    if (len == 0 || len >= MAX_PATH) return false;
+// Read the active GUI name from MainPrefs.xml. The value is stored as
+// e.g. value="&quot;Default&quot;", so we need to strip the escaped quotes.
+// Falls back to "Default" if anything goes wrong.
+static bool GetActiveGuiName(char* out, int outSize) {
+    char mainPrefsPath[MAX_PATH];
+    if (!BuildIniPathNarrow(mainPrefsPath, MAX_PATH)) return false;
 
-    wchar_t* slash = nullptr;
-    for (wchar_t* p = exePath; *p; ++p) {
-        if (*p == L'\\' || *p == L'/') slash = p;
+    // Replace "AOReloaded.ini" with "cd_image\gui\Default\MainPrefs.xml"
+    // by finding the last backslash in the ini path.
+    char* lastSlash = nullptr;
+    for (char* p = mainPrefsPath; *p; ++p) {
+        if (*p == '\\' || *p == '/') lastSlash = p;
     }
-    if (!slash) return false;
-    *(slash + 1) = L'\0';
+    if (!lastSlash) return false;
+    *(lastSlash + 1) = '\0';
 
-    wchar_t widePath[MAX_PATH];
-    if (swprintf(widePath, MAX_PATH,
-            L"%scd_image\\gui\\Default\\OptionPanel\\Root.xml", exePath) < 0)
+    char fullPath[MAX_PATH];
+    _snprintf_s(fullPath, sizeof(fullPath), _TRUNCATE,
+                "%scd_image\\gui\\Default\\MainPrefs.xml", mainPrefsPath);
+
+    // Read the file and search for GUIName value.
+    HANDLE hFile = CreateFileA(fullPath, GENERIC_READ, FILE_SHARE_READ,
+                               nullptr, OPEN_EXISTING, 0, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) return false;
+
+    DWORD fileSize = GetFileSize(hFile, nullptr);
+    if (fileSize == INVALID_FILE_SIZE || fileSize > 256 * 1024) {
+        CloseHandle(hFile);
         return false;
+    }
 
-    WideCharToMultiByte(CP_ACP, 0, widePath, -1, out, outSize, nullptr, nullptr);
+    auto* buf = new(std::nothrow) char[fileSize + 1];
+    if (!buf) { CloseHandle(hFile); return false; }
+
+    DWORD bytesRead = 0;
+    ReadFile(hFile, buf, fileSize, &bytesRead, nullptr);
+    CloseHandle(hFile);
+    buf[bytesRead] = '\0';
+
+    // Find: name="GUIName" value="&quot;SomeName&quot;"
+    const char* pos = std::strstr(buf, "\"GUIName\"");
+    if (!pos) { delete[] buf; return false; }
+
+    // Find the value= attribute after GUIName.
+    const char* valAttr = std::strstr(pos, "value=\"");
+    if (!valAttr) { delete[] buf; return false; }
+    valAttr += 7;  // skip past value="
+
+    // The value is wrapped in &quot; entities: &quot;Default&quot;
+    // Or it might just be a plain string. Handle both.
+    const char* nameStart = valAttr;
+    if (std::strncmp(nameStart, "&quot;", 6) == 0)
+        nameStart += 6;  // skip &quot;
+
+    // Find the end — either &quot; or "
+    const char* nameEnd = std::strstr(nameStart, "&quot;");
+    if (!nameEnd) nameEnd = std::strchr(nameStart, '"');
+    if (!nameEnd || nameEnd == nameStart) { delete[] buf; return false; }
+
+    int nameLen = static_cast<int>(nameEnd - nameStart);
+    if (nameLen >= outSize) nameLen = outSize - 1;
+    std::memcpy(out, nameStart, nameLen);
+    out[nameLen] = '\0';
+
+    delete[] buf;
+    return true;
+}
+
+static bool BuildRootXmlPath(char* out, int outSize) {
+    // Determine the active GUI name from MainPrefs.xml.
+    char guiName[128] = "Default";
+    GetActiveGuiName(guiName, sizeof(guiName));
+
+    char basePath[MAX_PATH];
+    if (!BuildIniPathNarrow(basePath, MAX_PATH)) return false;
+
+    // Strip filename from ini path to get the client directory.
+    char* lastSlash = nullptr;
+    for (char* p = basePath; *p; ++p) {
+        if (*p == '\\' || *p == '/') lastSlash = p;
+    }
+    if (!lastSlash) return false;
+    *(lastSlash + 1) = '\0';
+
+    _snprintf_s(out, outSize, _TRUNCATE,
+                "%scd_image\\gui\\%s\\OptionPanel\\Root.xml", basePath, guiName);
     return true;
 }
 
@@ -362,6 +430,7 @@ void PatchOptionsXml() {
         Log("[settings] could not resolve Root.xml path");
         return;
     }
+    Log("[settings] options panel XML: %s", xmlPath);
 
     // Read the entire file.
     HANDLE hFile = CreateFileA(xmlPath, GENERIC_READ, FILE_SHARE_READ,
