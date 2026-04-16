@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <new>
 
 namespace aor {
 
@@ -44,6 +45,7 @@ static SettingDef g_settings[] = {
     { "AOR_CamOn",    SettingType::Bool, 1,       1,       0,   1  },
     { "AOR_CYawSpd",  SettingType::Int,  2,       2,       1,  10  },
     { "AOR_MouseRun", SettingType::Bool, 1,       1,       0,   1  },
+    { "AOR_DebugLog", SettingType::Bool, 0,       0,       0,   1  },
 };
 
 static constexpr int kSettingCount = sizeof(g_settings) / sizeof(g_settings[0]);
@@ -262,7 +264,182 @@ static void __cdecl SetDValueDetour(const AOString& name, const AOVariant& value
     }
 }
 
+// ── .ini path helper (standalone, no Log dependency) ───────────────────
+//
+// Builds the absolute path to AOReloaded.ini next to the exe. Used by
+// IsDebugLogEnabled (called before logging is initialized) and by the
+// normal settings path resolver.
+
+static bool BuildIniPathNarrow(char* out, int outSize) {
+    wchar_t exePath[MAX_PATH] = {};
+    DWORD len = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH) return false;
+
+    wchar_t* slash = nullptr;
+    for (wchar_t* p = exePath; *p; ++p) {
+        if (*p == L'\\' || *p == L'/') slash = p;
+    }
+    if (!slash) return false;
+    *(slash + 1) = L'\0';
+
+    wchar_t widePath[MAX_PATH];
+    if (swprintf(widePath, MAX_PATH, L"%sAOReloaded.ini", exePath) < 0)
+        return false;
+
+    WideCharToMultiByte(CP_ACP, 0, widePath, -1, out, outSize, nullptr, nullptr);
+    return true;
+}
+
+// ── Options panel XML injection ────────────────────────────────────────
+//
+// The AOReloaded tab in Root.xml defines the in-game settings UI. Rather
+// than requiring users to manually edit the file, we inject it at runtime
+// if it's missing. The XML block is a static string kept here alongside
+// the settings table so new settings only need to be added in one place
+// (the table for persistence, and the XML for UI).
+
+static const char kAorXmlBlock[] =
+    "\n"
+    "  <ScrollView h_alignment=\"LEFT\" label=\"AOReloaded\" v_scrollbar_mode=\"auto\""
+    " scroll_client=\"aor_scroll\" max_size=\"Point(16000,-1)\">\n"
+    "    <ScrollViewChild name=\"aor_scroll\">\n"
+    "      <View h_alignment=\"LEFT\" view_layout=\"vertical\""
+    " max_size=\"Point(16000,-1)\" layout_borders=\"Rect(0,0,10,0)\">\n"
+    "        <TextView value=\"AOReloaded v0.1.0\" layout_borders=\"Rect(0,0,0,5)\" />\n"
+    "        <TextView value=\"Client mod framework. Settings are saved to AOReloaded.ini.\""
+    " layout_borders=\"Rect(0,0,0,10)\" />\n"
+    "\n"
+    "        <TextView value=\"Camera\" layout_borders=\"Rect(0,10,0,3)\" />\n"
+    "        <OptionCheckBox label=\"WoW-style camera (auto-recenter after LMB drag)\""
+    " layout_borders=\"Rect(10,0,0,0)\" opt_type=\"variant\" opt_variable=\"AOR_CamOn\"/>\n"
+    "        <OptionSlider label=\"Camera recenter speed:\""
+    " layout_borders=\"Rect(10,0,0,3)\" opt_type=\"variant\" opt_variable=\"AOR_CYawSpd\""
+    " value_fmt=\"&lt;font color=#70C4D0&gt;%.0f&lt;/font&gt;\" value_scale=\"1\"/>\n"
+    "        <OptionCheckBox label=\"LMB+RMB mouse-run (hold both mouse buttons to run forward)\""
+    " layout_borders=\"Rect(10,0,0,0)\" opt_type=\"variant\" opt_variable=\"AOR_MouseRun\"/>\n"
+    "\n"
+    "        <TextView value=\"Debug\" layout_borders=\"Rect(0,10,0,3)\" />\n"
+    "        <OptionCheckBox label=\"Enable debug logging (AOReloaded.log, requires restart)\""
+    " layout_borders=\"Rect(10,0,0,0)\" opt_type=\"variant\" opt_variable=\"AOR_DebugLog\"/>\n"
+    "\n"
+    "        <VLayoutSpacer/>\n"
+    "      </View>\n"
+    "    </ScrollViewChild>\n"
+    "  </ScrollView>\n";
+
+static bool BuildRootXmlPath(char* out, int outSize) {
+    wchar_t exePath[MAX_PATH] = {};
+    DWORD len = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH) return false;
+
+    wchar_t* slash = nullptr;
+    for (wchar_t* p = exePath; *p; ++p) {
+        if (*p == L'\\' || *p == L'/') slash = p;
+    }
+    if (!slash) return false;
+    *(slash + 1) = L'\0';
+
+    wchar_t widePath[MAX_PATH];
+    if (swprintf(widePath, MAX_PATH,
+            L"%scd_image\\gui\\Default\\OptionPanel\\Root.xml", exePath) < 0)
+        return false;
+
+    WideCharToMultiByte(CP_ACP, 0, widePath, -1, out, outSize, nullptr, nullptr);
+    return true;
+}
+
 // ── Public API ─────────────────────────────────────────────────────────
+
+bool IsDebugLogEnabled() {
+    char iniPath[MAX_PATH];
+    if (!BuildIniPathNarrow(iniPath, MAX_PATH)) return false;
+    return GetPrivateProfileIntA(kIniSection, "AOR_DebugLog", 0, iniPath) != 0;
+}
+
+void PatchOptionsXml() {
+    char xmlPath[MAX_PATH];
+    if (!BuildRootXmlPath(xmlPath, MAX_PATH)) {
+        Log("[settings] could not resolve Root.xml path");
+        return;
+    }
+
+    // Read the entire file.
+    HANDLE hFile = CreateFileA(xmlPath, GENERIC_READ, FILE_SHARE_READ,
+                               nullptr, OPEN_EXISTING, 0, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        Log("[settings] Root.xml not found at %s", xmlPath);
+        return;
+    }
+
+    DWORD fileSize = GetFileSize(hFile, nullptr);
+    if (fileSize == INVALID_FILE_SIZE || fileSize > 1024 * 1024) {
+        Log("[settings] Root.xml size invalid (%lu)", fileSize);
+        CloseHandle(hFile);
+        return;
+    }
+
+    // +1 for null terminator, + sizeof block for potential injection.
+    auto* buf = new(std::nothrow) char[fileSize + sizeof(kAorXmlBlock) + 1];
+    if (!buf) {
+        CloseHandle(hFile);
+        return;
+    }
+
+    DWORD bytesRead = 0;
+    ReadFile(hFile, buf, fileSize, &bytesRead, nullptr);
+    CloseHandle(hFile);
+    buf[bytesRead] = '\0';
+
+    // Check if AOReloaded tab already exists.
+    if (std::strstr(buf, "label=\"AOReloaded\"")) {
+        Log("[settings] Root.xml already has AOReloaded tab");
+        delete[] buf;
+        return;
+    }
+
+    // Find </root> and insert our block before it.
+    char* endTag = std::strstr(buf, "</root>");
+    if (!endTag) {
+        Log("[settings] Root.xml missing </root> — cannot inject");
+        delete[] buf;
+        return;
+    }
+
+    // Build the new file content: [before </root>] + our block + </root>\n
+    size_t prefixLen = static_cast<size_t>(endTag - buf);
+    size_t blockLen = std::strlen(kAorXmlBlock);
+    size_t suffixLen = std::strlen(endTag);  // "</root>" + any trailing whitespace
+
+    auto* newBuf = new(std::nothrow) char[prefixLen + blockLen + suffixLen + 1];
+    if (!newBuf) {
+        delete[] buf;
+        return;
+    }
+
+    std::memcpy(newBuf, buf, prefixLen);
+    std::memcpy(newBuf + prefixLen, kAorXmlBlock, blockLen);
+    std::memcpy(newBuf + prefixLen + blockLen, endTag, suffixLen);
+    size_t totalLen = prefixLen + blockLen + suffixLen;
+    newBuf[totalLen] = '\0';
+
+    delete[] buf;
+
+    // Write back.
+    hFile = CreateFileA(xmlPath, GENERIC_WRITE, 0,
+                        nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        Log("[settings] failed to open Root.xml for writing: %lu", GetLastError());
+        delete[] newBuf;
+        return;
+    }
+
+    DWORD written = 0;
+    WriteFile(hFile, newBuf, static_cast<DWORD>(totalLen), &written, nullptr);
+    CloseHandle(hFile);
+    delete[] newBuf;
+
+    Log("[settings] injected AOReloaded tab into Root.xml (%u bytes written)", written);
+}
 
 void SettingsInit() {
     ResolveIniPath();

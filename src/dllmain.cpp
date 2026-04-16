@@ -66,6 +66,10 @@ DWORD WINAPI DeferredInit(LPVOID /*param*/) {
     aor::SettingsInit();
     aor::SettingsRegisterAll();
 
+    // Ensure the AOReloaded tab exists in the options panel XML.
+    // Must happen before the game parses Root.xml (during world load).
+    aor::PatchOptionsXml();
+
     // Wait for game world.
     aor::Log("[init] waiting for game world...");
     for (int i = 0; i < 600; ++i) {
@@ -106,7 +110,12 @@ void OnProcessAttach(HINSTANCE self) {
 
     if (!IsAnarchyOnlineProcess()) return;
 
-    aor::LogInit();
+    // Only create the log file if debug logging is enabled in AOReloaded.ini.
+    // IsDebugLogEnabled reads the .ini directly — no game DLLs needed.
+    // When disabled, all Log() calls silently no-op.
+    if (aor::IsDebugLogEnabled()) {
+        aor::LogInit();
+    }
     aor::Log("[init] AOReloaded v0.1.0 loading");
 
     // Spawn the deferred init thread. We can't resolve game APIs here

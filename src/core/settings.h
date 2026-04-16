@@ -8,13 +8,20 @@
 // changes and writes them to the .ini immediately.
 //
 // Init flow (called from DeferredInit):
+//   0. IsDebugLogEnabled()   — reads .ini BEFORE LogInit (no game DLLs needed)
 //   1. SettingsInit()         — resolve .ini path, load persisted values
 //   2. SettingsRegisterAll()  — register DValues with loaded (or default) values
+//   2b. PatchOptionsXml()    — inject AOReloaded tab into Root.xml if missing
 //   3. SettingsInstallHook()  — detour SetDValue for change persistence
 //                               (call after game world is up, so we don't
 //                               spam the .ini during the game's own init)
 
 namespace aor {
+
+// Early check: reads AOR_DebugLog from AOReloaded.ini using only Win32 API.
+// Safe to call from DLL_PROCESS_ATTACH — does not touch game DLLs.
+// Returns false if the key is missing (default: logging off).
+bool IsDebugLogEnabled();
 
 // Step 1: Resolve the .ini file path and load any previously saved values
 // into an internal table. Does NOT touch DValues or game state.
@@ -23,6 +30,11 @@ void SettingsInit();
 // Step 2: Register each setting as a DValue via GameAPI::RegisterXxx,
 // using the value loaded from .ini (or the compiled-in default).
 void SettingsRegisterAll();
+
+// Step 2b: Ensure the AOReloaded tab exists in OptionPanel/Root.xml.
+// Reads the file, checks for our ScrollView, injects it if missing.
+// Must be called BEFORE the game parses the XML (i.e. before game world).
+void PatchOptionsXml();
 
 // Step 3: Install the SetDValue detour. Any subsequent SetDValue call
 // whose name matches a registered setting will trigger an .ini write.
