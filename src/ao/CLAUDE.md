@@ -83,6 +83,33 @@ The global registry is an `std::map<String, ValueEntry>` backed by a red-black t
 | `?ForcedUpdate@CameraVehicleFixedThird_t@@UAEX_N@Z` | Virtual; copies position from `+0x58` to `+0xdc`, calls `UpdateHeadingToPos`, then virtual `+0x98`. |
 | `?SetRelRot@n3Dynel_t@@QAEXABVQuaternion_t@@@Z` | Writes body rotation (forwards to `Vehicle_t::SetRelRot` on `dynel+0x50`). For the unparented local player, rel == global rot. Used by RMB-align to snap character facing to camera look direction. **Has a synchronous side effect** that recomputes camera targeting from `vehicle+0x1F8` × `vehicle+0x16C` — callers snapping both must write the new heading BEFORE invoking this, or the cascade renders one frame of a stale-heading × new-quat position. |
 
+## Gamecode.dll — Movement dispatcher
+
+### `n3EngineClientAnarchy_t::N3Msg_MovementChanged(MovementAction_e, float, float, bool)`
+
+Mangled: `?N3Msg_MovementChanged@n3EngineClientAnarchy_t@@QAEXW4MovementAction_e@Movement_n@@MM_N@Z` (Gamecode.dll, `__thiscall`). Central dispatcher for all character movement state changes. `n3EngineClientAnarchy_t` derives from `n3EngineClient_t`, so the singleton from `n3EngineClient_t::GetInstance()` can be passed as `this`. The `bool` argument controls server sync.
+
+**MovementAction_e values** (empirically confirmed by hooking the dispatcher and pressing keys):
+
+| Value | Action |
+|---|---|
+| 1 | StartForward (W) |
+| 2 | StopForward (release W) |
+| 3 | StartReverse (S) |
+| 4 | StopReverse (release S) |
+| 5 | TurnLeftStart |
+| 6 | TurnLeftStop |
+| 7 | TurnRightStart |
+| 8 | TurnRightStop |
+| 15 (0xf) | JumpStart |
+| 22 (0x16) | FullStop (used by `CheckMotionUpdate` heartbeat) |
+
+The RTTI list of `*TransitionAction_t` classes exists at `.rdata 101bf7ec+` but its order does NOT correspond to the enum values; the true mapping above was derived by observation.
+
+## Hook engine (`src/hooks/hook_engine.cpp`)
+
+Prologue whitelist includes `B8 xx xx xx xx` (`mov eax, imm32`) — the 5-byte MSVC SEH-prolog entry thunk used by functions with try/catch. The instruction is IP-independent and copies cleanly into the trampoline.
+
 ### `n3Engine_t` instance (engine timing)
 
 - `n3EngineClient_t::GetInstance()` returns the same singleton as `n3Engine_t::m_pcInstance`.

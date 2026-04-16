@@ -33,6 +33,10 @@ constexpr ProloguePattern kPrologues[] = {
     {{0x55, 0x8B, 0xEC, 0x51, 0x00}, {0xFF, 0xFF, 0xFF, 0xFF, 0x00}, "frame+push-r"},
     // push ebp; mov ebp,esp; push eax
     {{0x55, 0x8B, 0xEC, 0x50, 0x00}, {0xFF, 0xFF, 0xFF, 0xFF, 0x00}, "frame+push-r"},
+    // mov eax, imm32 — 5-byte relocatable instruction; used by MSVC as an
+    // SEH-prolog entry thunk (sets EH handler address, then jmp/call to
+    // _SEH_prolog). Safe to relocate into trampoline since it's IP-independent.
+    {{0xB8, 0x00, 0x00, 0x00, 0x00}, {0xFF, 0x00, 0x00, 0x00, 0x00}, "mov-eax-imm32"},
 };
 
 // Check if target starts with a known-safe prologue. Returns the pattern
