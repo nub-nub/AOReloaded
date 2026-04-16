@@ -43,6 +43,7 @@ static SettingDef g_settings[] = {
     // name           type              default  current  min  max
     { "AOR_CamOn",    SettingType::Bool, 1,       1,       0,   1  },
     { "AOR_CYawSpd",  SettingType::Int,  2,       2,       1,  10  },
+    { "AOR_MouseRun", SettingType::Bool, 1,       1,       0,   1  },
 };
 
 static constexpr int kSettingCount = sizeof(g_settings) / sizeof(g_settings[0]);

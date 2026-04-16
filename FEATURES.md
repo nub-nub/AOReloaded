@@ -19,7 +19,9 @@ Additionally, any **right-click drag** realigns your character to face the direc
 
 Forward movement from mouse buttons and the keyboard move-forward key (W / Up / Numpad 8) coexist cleanly: if you hold both mouse buttons and also press your forward key, releasing either input source does not interrupt the other. You can seamlessly transition between keyboard-driven and mouse-driven forward movement. Strafe and turn keys also work naturally while both mouse buttons are held.
 
-**Config:** Options panel (F10) → **AOReloaded** tab → **Camera** → "WoW-style camera (auto-recenter after LMB drag)". Lerp speed is controlled by the `AOR_CYawSpd` DValue (default 5; higher = snappier follow).
+**Config:** Options panel (F10) → **AOReloaded** tab → **Camera**:
+- "WoW-style camera (auto-recenter after LMB drag)" — master toggle for the camera system (yaw follow, RMB-align). Lerp speed controlled by the speed slider (default 2; higher = snappier follow).
+- "LMB+RMB mouse-run" — separately toggleable. When off, pressing both mouse buttons does nothing extra (stock behavior). When on, holding both buttons runs forward with mouse steering. Enabled by default.
 
 <!-- 
 Template for adding features:

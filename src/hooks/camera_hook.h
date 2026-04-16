@@ -1,24 +1,22 @@
 #pragma once
 
-// Camera system hooks for AOReloaded.
+// Camera behavior hooks for AOReloaded.
 //
-// Replaces ActionViewMouseHandler_c's state machine with one that tracks
-// LMB and RMB independently, enabling:
-//   - LMB hold: camera orbit (stock behavior)
-//   - RMB hold: character + camera steering (stock behavior)
-//   - LMB + RMB: run forward + steer (WoW-style, new)
-//   - Seamless single-button transitions when releasing one of two held buttons
+// Hooks CameraVehicleFixedThird_t::CalcSteering in N3.dll for per-frame
+// camera behaviors:
+//   - Yaw follow: camera smoothly returns behind character during movement
+//   - RMB-align: snap character facing to camera direction on RMB press
+//   - Both-buttons char-align: continuous alignment during BOTH_HELD
+//   - Unified forward evaluation: delegates to input_handler per frame
 //
-// Also hooks CameraVehicleFixedThird_t::CalcSteering for per-frame camera
-// behaviors: yaw follow during movement, RMB-align (snap character facing
-// to camera direction on RMB press).
+// Depends on input_handler for InputState and forward movement dispatch.
+// Call InitInputHandler() before InitCameraHooks().
 
 namespace aor {
 
-// Resolve APIs from N3.dll, Gamecode.dll, and GUI.dll, then install hooks
-// on CalcSteering + ActionViewMouseHandler_c callbacks.
-// Call after all three DLLs are loaded (game world active).
-// Returns true if all critical hooks installed successfully.
+// Resolve N3.dll camera functions and install the CalcSteering hook.
+// Call after InitInputHandler() and after N3.dll is loaded.
+// Returns true if hook installed successfully.
 bool InitCameraHooks();
 
 }  // namespace aor

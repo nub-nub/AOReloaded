@@ -16,6 +16,7 @@
 #include "core/logging.h"
 #include "core/settings.h"
 #include "ao/game_api.h"
+#include "hooks/input_handler.h"
 #include "hooks/camera_hook.h"
 
 #include <windows.h>
@@ -80,7 +81,12 @@ DWORD WINAPI DeferredInit(LPVOID /*param*/) {
         // SetDValue calls the game makes during its own startup.
         aor::SettingsInstallHook();
 
-        // Install camera hooks now that GUI.dll and N3.dll are loaded.
+        // Install input handler hooks (GUI.dll callbacks + movement filter).
+        if (!aor::InitInputHandler()) {
+            aor::Log("[init] input handler failed — running without input mod");
+        }
+
+        // Install camera hooks (N3.dll CalcSteering). Depends on input handler.
         if (!aor::InitCameraHooks()) {
             aor::Log("[init] camera hooks failed — running without camera mod");
         }

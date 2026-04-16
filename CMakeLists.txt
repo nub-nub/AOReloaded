@@ -37,6 +37,7 @@ add_library(AOReloaded SHARED
     src/ao/game_api.cpp
     src/ao/dvalue_dump.cpp
     src/hooks/hook_engine.cpp
+    src/hooks/input_handler.cpp
     src/hooks/camera_hook.cpp
 )
 
