@@ -2,15 +2,23 @@
 
 // Camera system hooks for AOReloaded.
 //
-// Phase 1: Hooks ActionViewMouseHandler_c::EndDrag in GUI.dll to fix the
-// LMB drag offset persistence bug. When a small accidental LMB drag ends
-// in 3rd person, auto-recenters camera behind the character.
+// Replaces ActionViewMouseHandler_c's state machine with one that tracks
+// LMB and RMB independently, enabling:
+//   - LMB hold: camera orbit (stock behavior)
+//   - RMB hold: character + camera steering (stock behavior)
+//   - LMB + RMB: run forward + steer (WoW-style, new)
+//   - Seamless single-button transitions when releasing one of two held buttons
+//
+// Also hooks CameraVehicleFixedThird_t::CalcSteering for per-frame camera
+// behaviors: yaw follow during movement, RMB-align (snap character facing
+// to camera direction on RMB press).
 
 namespace aor {
 
-// Resolve N3.dll camera functions and install the EndDrag hook.
-// Call after both GUI.dll and N3.dll are loaded (game world active).
-// Returns true if hook installed successfully.
+// Resolve APIs from N3.dll, Gamecode.dll, and GUI.dll, then install hooks
+// on CalcSteering + ActionViewMouseHandler_c callbacks.
+// Call after all three DLLs are loaded (game world active).
+// Returns true if all critical hooks installed successfully.
 bool InitCameraHooks();
 
 }  // namespace aor

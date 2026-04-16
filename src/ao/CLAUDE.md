@@ -106,9 +106,61 @@ Mangled: `?N3Msg_MovementChanged@n3EngineClientAnarchy_t@@QAEXW4MovementAction_e
 
 The RTTI list of `*TransitionAction_t` classes exists at `.rdata 101bf7ec+` but its order does NOT correspond to the enum values; the true mapping above was derived by observation.
 
+## GUI.dll — Signal/Slot System and ActionViewMouseHandler_c
+
+### Signal/Slot Architecture
+
+The game uses a type-safe signal/slot system (`SignalBase_c` / `SlotBase_c` / `SignalTarget_c`). Signals are members on singleton objects (e.g. `WindowController_c`, `GlobalSignals_c`). Slots are heap-allocated objects that store a target pointer + callback function pointer. `SlotObjN_c` templates parameterize the callback arity.
+
+- `WindowController_c::GetInstance()` @ `0x1000b454` — singleton (0x198 bytes). Contains 7 `SignalBase_c` members at `+0x30..+0x44`.
+- `GlobalSignals_c::GetInstance()` — via import at `[0x101a70e8]`. Contains signals at various offsets.
+
+### ActionViewMouseHandler_c — Complete RE
+
+**Class layout** (inherits `SignalTarget_c`, total 0x20 bytes):
+```
++0x00: vftable* (→ 0x101aeb2c, only inherited destructor)
++0x04: SignalTarget_c slot list
++0x08: int drag_mode         (0=none, 1=LMB_orbit, 2=RMB_steer)
++0x0C: int initiating_button (set on press, copied to +0x08 by BeginDrag)
++0x10: int button_state       (0xFFFFFFFF=none, 1=LMB, 2=RMB)
++0x14: float saved_cursor_x
++0x18: float saved_cursor_y
++0x1C: float accum_drag_dist  (click-vs-drag discriminator)
+```
+
+**Signal connections** (wired in constructor @ 0x1002c66b):
+
+| Signal Source | Offset | Callback | Slot Arity | Connector RVA |
+|---|---|---|---|---|
+| `WindowController_c` | `+0x3C` | `OnMouseDown(Point&, int button, int clickFlags)` | 3 | `0x1002c72e` |
+| `WindowController_c` | `+0x40` | `OnMouseUp(Point&, int button)` | 2 | `0x1002c78d` |
+| `WindowController_c` | `+0x38` | `OnMouseRelease(Point&, int button)` | 2 | `0x1002c78d` |
+| `GlobalSignals_c` | `+0x220` | `OnMouseMove(Point& delta)` | 1 | `0x1002c7ec` |
+| `GlobalSignals_c` | `+0x10` | `EndDrag()` | 0 | `0x1002c84b` |
+| `GlobalSignals_c` | `+0x08` | `EndDrag()` | 0 | `0x1002c84b` |
+| `GlobalSignals_c` | `+0x48` | `EndDrag()` | 0 | `0x1002c84b` |
+
+**Callback prologues and hookability:**
+
+| Callback | RVA | Prologue | RET | Hookable? |
+|---|---|---|---|---|
+| OnMouseDown | `0x1002c2ee` | `B8 imm32` (SEH) | `RET 0xC` | Yes |
+| OnMouseUp | `0x1002c469` | `B8 imm32` (SEH) | `RET 0x8` | Yes |
+| OnMouseRelease | `0x1002c14d` | `55 8B EC 56 8B F1` | `RET 0x8` | **No** — 4-byte prolog, 5th byte splits 2-byte instruction |
+| OnMouseMove | `0x1002c17b` | `B8 imm32` (SEH) | `RET 0x4` | Yes |
+| EndDrag | `0x1002c0e5` | `55 8B EC 51 51` | `RET` | Yes |
+| BeginDrag | `0x1002c09b` | (not a signal callback) | — | N/A |
+
+**Other data labels:**
+- `ActionViewMouseHandler_c_DRAG_THRESHOLD` @ `0x101aeaf4` — float, click-vs-drag distance threshold used in OnMouseUp
+- `ActionViewMouseHandler_c_vftable` @ `0x101aeb2c` — vtable (just SignalTarget_c destructor)
+
 ## Hook engine (`src/hooks/hook_engine.cpp`)
 
 Prologue whitelist includes `B8 xx xx xx xx` (`mov eax, imm32`) — the 5-byte MSVC SEH-prolog entry thunk used by functions with try/catch. The instruction is IP-independent and copies cleanly into the trampoline.
+
+**Known limitation:** The `frame+push-r` patterns (`55 8B EC 5x xx`) wildcard the 5th byte (`0x00` mask). If the 5th byte starts a multi-byte instruction (e.g. `8B F1` = `MOV ESI,ECX`), the 5-byte copy splits it — the trampoline executes a garbled instruction and the jump-back lands mid-instruction. Safe only when byte 4 is a complete 1-byte instruction (PUSH r32 range `0x50-0x57`).
 
 ### `n3Engine_t` instance (engine timing)
 

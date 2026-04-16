@@ -1,14 +1,19 @@
-// camera_hook.cpp — WoW-style camera: auto-follow behind character during movement.
+// camera_hook.cpp — Replacement ActionViewMouseHandler_c state machine
+//                  + per-frame camera behaviors (yaw follow, RMB-align).
 //
-// LMB drag orbits camera. On release, camera stays at new angle.
-// When the character moves, camera gradually lerps back behind the character.
-// When stationary, camera stays wherever you left it.
+// Hooks 5 functions:
+//   1. CameraVehicleFixedThird_t::CalcSteering (N3.dll)  — per-frame camera
+//   2. ActionViewMouseHandler_c::OnMouseDown   (GUI.dll)  — button press
+//   3. ActionViewMouseHandler_c::OnMouseMove   (GUI.dll)  — drag dispatch
+//   4. ActionViewMouseHandler_c::OnMouseUp     (GUI.dll)  — click passthrough
+//   5. ActionViewMouseHandler_c::EndDrag        (GUI.dll)  — cleanup/transitions
 //
-// Implementation: hook CameraVehicleFixedThird_t::CalcSteering (per-frame).
-// Before the original steering runs, check if the player is moving. If so,
-// lerp the camera heading direction toward "behind the character" using the
-// player's facing quaternion. The original CalcSteering then steers toward
-// the updated heading naturally.
+// The stock handler's single drag_mode field is replaced with an InputState
+// struct that tracks LMB and RMB independently, enabling combined-button
+// states (BOTH_HELD → forward movement + char steering).
+//
+// Stock OnMouseRelease is NOT hooked (unhookable prologue). It delegates to
+// EndDrag which we DO hook, so all release logic flows through our detour.
 
 #include "hooks/camera_hook.h"
 #include "hooks/hook_engine.h"
@@ -29,11 +34,7 @@ using FnGetEngineInstance    = void*(__cdecl*)();
 using FnGetActiveCamera      = void*(__thiscall*)(void* engine);
 using FnIsFirstPerson        = bool(__thiscall*)(void* camera);
 using FnGetClientControlDynel = void*(__thiscall*)(void* engine);
-
-// GetGlobalPos returns const Vector3_t& (pointer in EAX).
 using FnGetGlobalPos = float*(__thiscall*)(void* dynel);
-
-// n3Dynel_t::SetRelRot(Quaternion const&) — writes body rotation via Vehicle_t.
 using FnSetRelRot = void(__thiscall*)(void* dynel, const void* quat);
 
 static FnGetEngineInstance     GetEngineInstance     = nullptr;
@@ -83,19 +84,11 @@ static bool Init() {
 
 namespace GamecodeAPI {
 
-// n3EngineClientAnarchy_t::N3Msg_MovementChanged(MovementAction_e, float, float, bool).
 using FnN3MsgMovementChanged =
     void(__thiscall*)(void* engineAnarchy, int action,
                       float f1, float f2, bool b);
 
-// n3EngineClientAnarchy_t::N3Msg_EndMouseMovement() — ends the mouse-look
-// mode (resets cursor capture, stops any in-progress RMB/LMB turn, fires
-// FullStop). Hooked so we can suppress it when the OTHER mouse button is
-// still held (fixing the "release one → both mode ends" issue).
-using FnN3MsgEndMouseMovement = void(__thiscall*)(void* engineAnarchy);
-
 static FnN3MsgMovementChanged  N3Msg_MovementChanged   = nullptr;
-static FnN3MsgEndMouseMovement N3Msg_EndMouseMovement  = nullptr;
 
 static bool Init() {
     HMODULE gc = GetModuleHandleA("Gamecode.dll");
@@ -114,27 +107,113 @@ static bool Init() {
     }
     N3Msg_MovementChanged = reinterpret_cast<FnN3MsgMovementChanged>(p);
     Log("[camera] resolved N3Msg_MovementChanged -> %p", p);
-
-    void* pe = reinterpret_cast<void*>(GetProcAddress(gc,
-        "?N3Msg_EndMouseMovement@n3EngineClientAnarchy_t@@QAEXXZ"));
-    if (pe) {
-        N3Msg_EndMouseMovement =
-            reinterpret_cast<FnN3MsgEndMouseMovement>(pe);
-        Log("[camera] resolved N3Msg_EndMouseMovement -> %p", pe);
-    } else {
-        Log("[camera] FAILED to resolve N3Msg_EndMouseMovement");
-    }
-
     return true;
 }
 
 }  // namespace GamecodeAPI
 
-// MovementAction_e enum values, confirmed by live-hooking the native
-// N3Msg_MovementChanged dispatcher and observing W/S key presses.
+// ── GUI.dll API ─────────────────────────────────────────────────────────
+//
+// Functions resolved from GUI.dll by two methods:
+//   1. Direct RVA — for functions defined in GUI.dll itself
+//   2. Cached pointer read — for functions imported lazily by GUI.dll
+//      (stored in data section, populated before mouse events fire)
+
+namespace GUIAPI {
+
+// Function types
+using FnGetInstance     = void*(__cdecl*)();
+using FnN3MsgLook      = void(__thiscall*)(void* n3im, float dx, float dy);
+using FnN3MsgEnd       = void(__thiscall*)(void* n3im);
+using FnAFCMSend       = void(__thiscall*)(void* afcm, int cmd, int param);
+using FnWCGetInstance   = void*(__cdecl*)();
+using FnWCGetDragObj    = void*(__thiscall*)(void* wc);
+using FnWCSetMousePos   = void(__thiscall*)(void* wc, const void* point, bool clamp);
+
+// Module base
+static uintptr_t g_guiBase = 0;
+
+// Direct GUI.dll functions (by RVA)
+static FnWCGetInstance  WC_GetInstance     = nullptr;   // 0xb454
+static FnWCGetDragObj   WC_GetDragObject   = nullptr;   // 0x156e29
+static FnWCSetMousePos  WC_SetMousePosition = nullptr;  // 0x156abf
+
+// Read a cached function pointer from GUI.dll's data section.
+template<typename T>
+static T ReadCachedPtr(uint32_t rva) {
+    return *reinterpret_cast<T*>(g_guiBase + rva);
+}
+
+// ── N3InterfaceModule_t dispatch ────────────────────────────────────
+// These read the lazy-resolved pointers every call (matches stock code).
+
+static void* GetN3IM() {
+    auto fn = ReadCachedPtr<FnGetInstance>(0x1a772c);
+    return fn ? fn() : nullptr;
+}
+
+static void CameraMouseLookMovement(float dx, float dy) {
+    void* n3im = GetN3IM();
+    auto fn = ReadCachedPtr<FnN3MsgLook>(0x1a7604);
+    if (n3im && fn) fn(n3im, dx, dy);
+}
+
+static void MouseMovement(float dx, float dy) {
+    void* n3im = GetN3IM();
+    auto fn = ReadCachedPtr<FnN3MsgLook>(0x1a7600);
+    if (n3im && fn) fn(n3im, dx, dy);
+}
+
+static void EndCameraMouseLook() {
+    void* n3im = GetN3IM();
+    auto fn = ReadCachedPtr<FnN3MsgEnd>(0x1a760c);
+    if (n3im && fn) fn(n3im);
+}
+
+static void EndMouseLook() {
+    void* n3im = GetN3IM();
+    auto fn = ReadCachedPtr<FnN3MsgEnd>(0x1a7608);
+    if (n3im && fn) fn(n3im);
+}
+
+// ── AFCM dispatch ───────────────────────────────────────────────────
+
+static void AFCMSend(int cmd, int param) {
+    auto getInst = ReadCachedPtr<FnGetInstance>(0x1a70e0);
+    auto send    = ReadCachedPtr<FnAFCMSend>(0x1a70e4);
+    if (getInst && send) {
+        void* afcm = getInst();
+        if (afcm) send(afcm, cmd, param);
+    }
+}
+
+static bool Init() {
+    HMODULE gui = GetModuleHandleA("GUI.dll");
+    if (!gui) {
+        Log("[camera] GUI.dll not loaded");
+        return false;
+    }
+    g_guiBase = reinterpret_cast<uintptr_t>(gui);
+    Log("[camera] GUI.dll at %p", gui);
+
+    WC_GetInstance      = reinterpret_cast<FnWCGetInstance>(g_guiBase + 0xb454);
+    WC_GetDragObject    = reinterpret_cast<FnWCGetDragObj>(g_guiBase + 0x156e29);
+    WC_SetMousePosition = reinterpret_cast<FnWCSetMousePos>(g_guiBase + 0x156abf);
+
+    Log("[camera] WC::GetInstance -> %p", WC_GetInstance);
+    Log("[camera] WC::GetDragObject -> %p", WC_GetDragObject);
+    Log("[camera] WC::SetMousePosition -> %p", WC_SetMousePosition);
+    return true;
+}
+
+}  // namespace GUIAPI
+
+// ── Constants ───────────────────────────────────────────────────────────
+
 constexpr int kActionStartForward = 1;
 constexpr int kActionStopForward  = 2;
-
+constexpr float kDefaultFollowSpeed = 5.0f;
+constexpr float kMovementThreshold = 0.01f;
 
 // ── Math helpers ────────────────────────────────────────────────────────
 
@@ -142,147 +221,120 @@ static float Vec3LenXZ(float x, float z) {
     return std::sqrt(x * x + z * z);
 }
 
+// ── Input State Machine ─────────────────────────────────────────────────
+
+enum class MouseState : uint8_t {
+    IDLE,
+    PENDING_LMB,
+    PENDING_RMB,
+    DRAGGING_LMB,
+    DRAGGING_RMB,
+    BOTH_HELD,
+};
+
+struct InputState {
+    MouseState state        = MouseState::IDLE;
+    bool       cursor_hidden = false;
+    float      saved_cursor_x = 0.0f;
+    float      saved_cursor_y = 0.0f;
+    float      accum_dist   = 0.0f;
+};
+
+static InputState g_input;
+
+// Check if our camera system is enabled.
+static bool IsEnabled() {
+    AOVariant v{};
+    if (GameAPI::GetVariant("AOR_CamOn", v) &&
+        v.type == static_cast<uint32_t>(VariantType::Bool)) {
+        return v.as_bool;
+    }
+    return true;  // default enabled
+}
+
+// Read MouseTurnSensitivity DValue.
+static float GetMouseSensitivity() {
+    AOVariant v{};
+    if (GameAPI::GetVariant("AOR_MSens", v)) {
+        if (v.type == static_cast<uint32_t>(VariantType::Float))
+            return v.as_float;
+        if (v.type == static_cast<uint32_t>(VariantType::Int))
+            return static_cast<float>(v.as_int);
+    }
+    // Fall back to stock DValue.
+    AOVariant sv{};
+    if (GameAPI::GetVariant("MouseTurnSens", sv)) {
+        if (sv.type == static_cast<uint32_t>(VariantType::Float))
+            return sv.as_float;
+        if (sv.type == static_cast<uint32_t>(VariantType::Int))
+            return static_cast<float>(sv.as_int);
+    }
+    return 1.0f;
+}
+
+// Begin a drag: save cursor, hide it, zero distance accumulator.
+static void BeginDragVisuals() {
+    if (g_input.cursor_hidden) return;
+
+    void* wc = GUIAPI::WC_GetInstance();
+    if (wc) {
+        auto* cursor = reinterpret_cast<float*>(reinterpret_cast<uintptr_t>(wc) + 0x48);
+        g_input.saved_cursor_x = cursor[0];
+        g_input.saved_cursor_y = cursor[1];
+    }
+    g_input.accum_dist = 0.0f;
+    g_input.cursor_hidden = true;
+    GUIAPI::AFCMSend(0x12, 0x3d);  // hide cursor
+}
+
+// End drag visuals: show cursor.
+static void EndDragVisuals() {
+    if (!g_input.cursor_hidden) return;
+    g_input.cursor_hidden = false;
+    GUIAPI::AFCMSend(0x12, 6);  // show cursor
+}
+
 // ── CalcSteering hook ───────────────────────────────────────────────────
 //
 // CameraVehicleFixedThird_t::CalcSteering (N3.dll RVA 0x1f752)
-// __thiscall, RET 4 (one stack param: Vector3_t& result)
-//
-// Called every frame for 3rd person camera. We inject yaw follow logic
-// before the original steering computation.
+// Per-frame: yaw follow during movement, RMB-align, both-buttons alignment.
 
 constexpr uint32_t kCalcSteeringRVA = 0x0001f752;
 
 using FnCalcSteering = int(__thiscall*)(void* vehicle, void* result);
 static FnCalcSteering g_origCalcSteering = nullptr;
 
-// Per-frame state for movement detection.
 static float g_lastPlayerX = 0.0f;
 static float g_lastPlayerZ = 0.0f;
 static bool  g_hasLastPos  = false;
 
-// Edge-detection for RMB-align (character → camera facing on RMB press).
+// Edge detection for RMB-align (one-shot per press).
 static bool  g_rmbWasHeld  = false;
-// Edge-detection for both-mouse-buttons-held → run forward.
-static bool  g_bothWasHeld = false;
-
-// Mouse-button state machine patch. The AO exe's WndProcImpl takes FIVE
-// __stdcall args: (void* windowState, HWND, UINT msg, WPARAM, LPARAM).
-// The leading object pointer is AO's internal window-state struct; the
-// WndProc stub at 0x00405d4e loads it from [0x00411fb4] and pushes it as
-// arg1 before forwarding to WndProcImpl. RET 0x14 in WndProcImpl confirms
-// 5 dwords of callee cleanup.
-using FnWndProc = LRESULT(__stdcall*)(void*, HWND, UINT, WPARAM, LPARAM);
-static FnWndProc g_origWndProc = nullptr;
-static bool      g_lmbSwallowed = false;
-
-static LRESULT __stdcall WndProcDetour(void* windowState, HWND hwnd,
-                                       UINT msg, WPARAM wParam,
-                                       LPARAM lParam) {
-    bool rmbHeld = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
-    bool lmbHeld = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
-
-    switch (msg) {
-    case WM_LBUTTONDOWN:
-        // LMB-down while RMB is already held would switch the game from
-        // RMB-turn to LMB-orbit, killing mouse-turn. Swallow.
-        if (rmbHeld) {
-            g_lmbSwallowed = true;
-            return 0;
-        }
-        break;
-
-    case WM_LBUTTONUP: {
-        // Case A: this release matches an LMB-down we swallowed earlier.
-        // Swallow so the game stays blind to the whole LMB cycle.
-        if (g_lmbSwallowed) {
-            g_lmbSwallowed = false;
-            return 0;
-        }
-        // Case B: real LMB release while RMB is still physically held.
-        // The game will ReleaseCapture and end whichever mode it was in;
-        // drop a synthetic WM_RBUTTONDOWN straight after so it re-enters
-        // RMB-turn mode. SendMessage (synchronous) keeps ReleaseCapture
-        // → new SetCapture back-to-back so the cursor doesn't flicker.
-        if (rmbHeld) {
-            LRESULT r = g_origWndProc(windowState, hwnd, msg,
-                                      wParam, lParam);
-            SendMessageA(hwnd, WM_RBUTTONDOWN, MK_RBUTTON, lParam);
-            return r;
-        }
-        break;
-    }
-
-    case WM_RBUTTONUP:
-        // RMB release while LMB is still physically held. Let the game
-        // end RMB-turn, then synthesize a WM_LBUTTONDOWN so it re-enters
-        // LMB-orbit. Clear g_lmbSwallowed — the game now genuinely holds
-        // an LMB-down (from our synth) and the next real WM_LBUTTONUP
-        // must pass through to end LMB-orbit cleanly.
-        if (lmbHeld) {
-            LRESULT r = g_origWndProc(windowState, hwnd, msg,
-                                      wParam, lParam);
-            g_lmbSwallowed = false;
-            SendMessageA(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lParam);
-            return r;
-        }
-        break;
-
-    default:
-        break;
-    }
-
-    return g_origWndProc(windowState, hwnd, msg, wParam, lParam);
-}
-
-// Default follow speed (DValue overridable).
-constexpr float kDefaultFollowSpeed = 5.0f;
-
-// Minimum movement per frame to count as "moving" (in world units).
-constexpr float kMovementThreshold = 0.01f;
 
 static int __fastcall CalcSteeringDetour(void* vehicle, void* /*edx*/, void* result) {
-    // Get engine + player dynel.
     void* engine = N3API::GetEngineInstance ? N3API::GetEngineInstance() : nullptr;
     if (!engine) goto call_original;
 
     // Check master toggle.
-    {
-        AOVariant enabled{};
-        if (GameAPI::GetVariant("AOR_CamOn", enabled) &&
-            enabled.type == static_cast<uint32_t>(VariantType::Bool) &&
-            !enabled.as_bool) {
-            g_rmbWasHeld = false;  // reset edge detector so disable/enable is clean
-            goto call_original;
-        }
+    if (!IsEnabled()) {
+        g_rmbWasHeld = false;
+        goto call_original;
     }
 
-    // ── RMB-align: on RMB press edge, rotate the player dynel so char
-    // faces where the camera is pointing, then reset the camera's local
-    // heading to "directly behind" (preserving pitch). WoW-style: right-
-    // clicking realigns character with camera view instead of dragging
-    // the character+camera offset together.
+    // ── RMB-align & both-buttons continuous alignment ───────────────
     {
-        bool rmbHeld = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
-        bool lmbHeld = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+        // Read button state from our InputState instead of GetAsyncKeyState.
+        bool rmbHeld = (g_input.state == MouseState::DRAGGING_RMB ||
+                        g_input.state == MouseState::BOTH_HELD);
+        // lmbHeld not currently used but reserved for future LMB-specific
+        // per-frame behaviors (e.g., orbit dampening).
+        (void)(g_input.state == MouseState::DRAGGING_LMB);
         bool rmbEdge = rmbHeld && !g_rmbWasHeld;
         g_rmbWasHeld = rmbHeld;
 
-        // Both-mouse-buttons → run forward. Dispatch on rising/falling edge.
-        bool bothHeld = rmbHeld && lmbHeld;
-        if (bothHeld != g_bothWasHeld && GamecodeAPI::N3Msg_MovementChanged) {
-            int action = bothHeld ? kActionStartForward : kActionStopForward;
-            GamecodeAPI::N3Msg_MovementChanged(engine, action, 0.0f, 0.0f, true);
-        }
-
-        g_bothWasHeld = bothHeld;
-
-        // Continuous char-align during both-held. Every frame, rotate
-        // the player dynel so it faces where the camera is looking, and
-        // reset local heading to "behind". Effect: any camera motion
-        // (LMB orbit, RMB turn, or anything else) drags the character
-        // along, so mouse drag during both-held always turns the
-        // character regardless of which mode the game is internally in.
-        bool doAlign = (rmbEdge || bothHeld) && N3API::SetRelRot;
+        // Continuous char-align during both-held or one-shot on RMB edge.
+        bool doAlign = (rmbEdge || g_input.state == MouseState::BOTH_HELD)
+                        && N3API::SetRelRot;
         if (doAlign) {
             auto base = reinterpret_cast<uintptr_t>(vehicle);
             float hx = *reinterpret_cast<float*>(base + 0x1F8);
@@ -291,19 +343,12 @@ static int __fastcall CalcSteeringDetour(void* vehicle, void* /*edx*/, void* res
 
             if (lenXZ >= 0.001f) {
                 constexpr float kPi = 3.14159265358979323846f;
-
-                // delta = -π/2 - atan2(hz, hx). See derivation in commit note:
-                // char_forward_world = (sin θ, 0, cos θ); camera look dir in
-                // world = -rotate(local_heading, charQuat). Setting char to
-                // face camera look yields this formula (zero when heading
-                // already points locally "behind" (0, 0, -1)).
                 float beta  = std::atan2(hz, hx);
                 float delta = -kPi * 0.5f - beta;
                 while (delta >  kPi) delta -= 2.0f * kPi;
                 while (delta < -kPi) delta += 2.0f * kPi;
 
                 if (std::fabs(delta) > 0.001f) {
-                    // Char yaw quat at vehicle+0x16C is pure-Y: (0, qy, 0, qw).
                     float qy = *reinterpret_cast<float*>(base + 0x170);
                     float qw = *reinterpret_cast<float*>(base + 0x178);
                     float currentAngle = 2.0f * std::atan2(qy, qw);
@@ -315,15 +360,8 @@ static int __fastcall CalcSteeringDetour(void* vehicle, void* /*edx*/, void* res
                             0.0f,
                             std::cos(newAngle * 0.5f) };
 
-                    // ORDER MATTERS: reset local heading BEFORE SetRelRot.
-                    // SetRelRot on the player dynel triggers a synchronous
-                    // cascade (locality notify → recompute camera target)
-                    // that reads camera heading × char-yaw. If heading is
-                    // still at its pre-snap offset when that runs, the
-                    // camera gets placed at a doubly-rotated (offset ×
-                    // rotation delta) position for one rendered frame.
-                    // Resetting heading first makes the cascade see the
-                    // correct post-snap state.
+                    // Reset local heading BEFORE SetRelRot (order matters —
+                    // see ao/CLAUDE.md for the synchronous cascade issue).
                     *reinterpret_cast<float*>(base + 0x1F8) = 0.0f;
                     *reinterpret_cast<float*>(base + 0x200) = -lenXZ;
 
@@ -335,11 +373,11 @@ static int __fastcall CalcSteeringDetour(void* vehicle, void* /*edx*/, void* res
         }
     }
 
+    // ── Yaw follow during movement ──────────────────────────────────
     {
         void* dynel = N3API::GetClientControlDynel(engine);
         if (!dynel) goto call_original;
 
-        // Get player position.
         float* pos = N3API::GetGlobalPos(dynel);
         if (!pos) goto call_original;
 
@@ -353,7 +391,6 @@ static int __fastcall CalcSteeringDetour(void* vehicle, void* /*edx*/, void* res
             goto call_original;
         }
 
-        // Compute movement distance in XZ plane.
         float dx = px - g_lastPlayerX;
         float dz = pz - g_lastPlayerZ;
         float moveDist = Vec3LenXZ(dx, dz);
@@ -361,32 +398,23 @@ static int __fastcall CalcSteeringDetour(void* vehicle, void* /*edx*/, void* res
         g_lastPlayerX = px;
         g_lastPlayerZ = pz;
 
-        // Only follow when character is moving.
         if (moveDist < kMovementThreshold) goto call_original;
 
-        // Don't follow while LMB is held (player is orbiting camera).
-        if (GetAsyncKeyState(VK_LBUTTON) & 0x8000) goto call_original;
+        // Don't follow while LMB-only is held (player is orbiting camera).
+        if (g_input.state == MouseState::DRAGGING_LMB) goto call_original;
 
         auto base = reinterpret_cast<uintptr_t>(vehicle);
 
-        // "Behind the character" in the heading's local space is always (0, -1).
-        // RecalcOptimalPos rotates heading by the character yaw quaternion at
-        // vehicle+0x16c, so local (0, -1) becomes world-space "behind character".
-        // This means direction is based on character FACING, not movement direction
-        // — walking backwards won't flip the camera.
         float behindX = 0.0f;
         float behindZ = -1.0f;
 
-        // Read current camera heading from vehicle+0x1F8 (3D direction vector).
         float* headingX = reinterpret_cast<float*>(base + 0x1F8);
-        float* headingY = reinterpret_cast<float*>(base + 0x1FC);
+        // headingY preserved at +0x1FC — pitch is never modified by yaw follow.
         float* headingZ = reinterpret_cast<float*>(base + 0x200);
 
-        // Read delta time from engine+0x68.
         float dt = *reinterpret_cast<float*>(
             reinterpret_cast<uintptr_t>(engine) + 0x68);
 
-        // Follow speed — read from DValue or use default.
         float followSpeed = kDefaultFollowSpeed;
         AOVariant speedVal{};
         if (GameAPI::GetVariant("AOR_CYawSpd", speedVal)) {
@@ -399,16 +427,12 @@ static int __fastcall CalcSteeringDetour(void* vehicle, void* /*edx*/, void* res
         float t = dt * followSpeed;
         if (t > 1.0f) t = 1.0f;
 
-        // Angle-based lerp — uniform angular speed and correct shortest-path
-        // for any angular distance (including near-180° where vector lerp
-        // collapses to near-zero direction changes).
         float oldLenXZ = Vec3LenXZ(*headingX, *headingZ);
         if (oldLenXZ < 0.001f) goto call_original;
 
         float currentAngle = std::atan2(*headingZ, *headingX);
         float targetAngle  = std::atan2(behindZ, behindX);
         float diff = targetAngle - currentAngle;
-        // Wrap to [-π, π] so we always rotate the short way.
         constexpr float kPi = 3.14159265358979323846f;
         if (diff >  kPi) diff -= 2.0f * kPi;
         if (diff < -kPi) diff += 2.0f * kPi;
@@ -416,12 +440,265 @@ static int __fastcall CalcSteeringDetour(void* vehicle, void* /*edx*/, void* res
         float newAngle = currentAngle + diff * t;
         *headingX = std::cos(newAngle) * oldLenXZ;
         *headingZ = std::sin(newAngle) * oldLenXZ;
-        // headingY unchanged — preserves pitch.
     }
 
 call_original:
-    int ret = g_origCalcSteering(vehicle, result);
-    return ret;
+    return g_origCalcSteering(vehicle, result);
+}
+
+// ── ActionViewMouseHandler_c detours ────────────────────────────────────
+//
+// Hook targets in GUI.dll. Each callback receives the handler instance in
+// ECX via slot dispatch. Detours use __fastcall(this, edx, ...stack_args).
+// Trampolines typed as __thiscall to preserve RET N cleanup.
+
+// OnMouseDown: void __thiscall(Point const& pos, int button, int clickFlags)
+// RET 0xC (3 stack args)
+constexpr uint32_t kOnMouseDownRVA = 0x0002c2ee;
+using FnOnMouseDown = void(__thiscall*)(void* this_ecx, const float* pos, int button, int clickFlags);
+static FnOnMouseDown g_origOnMouseDown = nullptr;
+
+// OnMouseMove: void __thiscall(Point const& delta)
+// RET 0x4 (1 stack arg)
+constexpr uint32_t kOnMouseMoveRVA = 0x0002c17b;
+using FnOnMouseMove = void(__thiscall*)(void* this_ecx, const float* delta);
+static FnOnMouseMove g_origOnMouseMove = nullptr;
+
+// OnMouseUp: void __thiscall(Point const& pos, int button)
+// RET 0x8 (2 stack args)
+constexpr uint32_t kOnMouseUpRVA = 0x0002c469;
+using FnOnMouseUp = void(__thiscall*)(void* this_ecx, const float* pos, int button);
+static FnOnMouseUp g_origOnMouseUp = nullptr;
+
+// EndDrag: void __thiscall()
+// RET 0 (no stack args)
+constexpr uint32_t kEndDragRVA = 0x0002c0e5;
+using FnEndDrag = void(__thiscall*)(void* this_ecx);
+static FnEndDrag g_origEndDrag = nullptr;
+
+// ── OnMouseDown detour ──────────────────────────────────────────────────
+
+static void __fastcall OnMouseDownDetour(void* this_ecx, void* /*edx*/,
+                                          const float* pos, int button,
+                                          int clickFlags) {
+    // Always call original first — it handles double-click actions and the
+    // DragObject guard. This is safe: the original just sets handler fields
+    // (+0x0C, +0x10) which we overwrite below.
+    g_origOnMouseDown(this_ecx, pos, button, clickFlags);
+
+    if (!IsEnabled()) return;  // stock behavior stands
+
+    // If original returned because DragObject was active, we should too.
+    void* wc = GUIAPI::WC_GetInstance();
+    if (wc && GUIAPI::WC_GetDragObject(wc)) return;
+
+    // Zero out stock handler fields so stock OnMouseMove (if it ever runs
+    // via a code path we didn't anticipate) won't activate a stock drag.
+    auto* handler = reinterpret_cast<uint8_t*>(this_ecx);
+    *reinterpret_cast<int*>(handler + 0x08) = 0;
+    *reinterpret_cast<int*>(handler + 0x0C) = 0;
+    *reinterpret_cast<int*>(handler + 0x10) = static_cast<int>(0xFFFFFFFF);
+
+    void* engine = N3API::GetEngineInstance ? N3API::GetEngineInstance() : nullptr;
+
+    if (button == 1) {  // LMB
+        switch (g_input.state) {
+        case MouseState::PENDING_RMB:
+        case MouseState::DRAGGING_RMB:
+            // RMB already active → enter BOTH_HELD.
+            if (g_input.state == MouseState::PENDING_RMB)
+                BeginDragVisuals();
+            // Already in MouseMovement mode, just add forward.
+            if (engine && GamecodeAPI::N3Msg_MovementChanged)
+                GamecodeAPI::N3Msg_MovementChanged(engine, kActionStartForward, 0, 0, true);
+            g_input.state = MouseState::BOTH_HELD;
+            break;
+
+        case MouseState::DRAGGING_LMB:
+        case MouseState::BOTH_HELD:
+            break;  // already in LMB or both mode, ignore
+
+        default:  // IDLE or PENDING_LMB
+            g_input.state = MouseState::PENDING_LMB;
+            break;
+        }
+    } else if (button == 2) {  // RMB
+        switch (g_input.state) {
+        case MouseState::PENDING_LMB:
+        case MouseState::DRAGGING_LMB:
+            // LMB already active → enter BOTH_HELD.
+            if (g_input.state == MouseState::PENDING_LMB)
+                BeginDragVisuals();
+            if (g_input.state == MouseState::DRAGGING_LMB) {
+                // End camera orbit mode before switching to char steer.
+                GUIAPI::EndCameraMouseLook();
+            }
+            if (engine && GamecodeAPI::N3Msg_MovementChanged)
+                GamecodeAPI::N3Msg_MovementChanged(engine, kActionStartForward, 0, 0, true);
+            g_input.state = MouseState::BOTH_HELD;
+            break;
+
+        case MouseState::DRAGGING_RMB:
+        case MouseState::BOTH_HELD:
+            break;  // already in RMB or both mode, ignore
+
+        default:  // IDLE or PENDING_RMB
+            g_input.state = MouseState::PENDING_RMB;
+            break;
+        }
+    }
+}
+
+// ── OnMouseMove detour ──────────────────────────────────────────────────
+
+static void __fastcall OnMouseMoveDetour(void* this_ecx, void* /*edx*/,
+                                          const float* delta) {
+    if (!IsEnabled()) {
+        g_origOnMouseMove(this_ecx, delta);
+        return;
+    }
+
+    // Transition from PENDING → DRAGGING on first mouse movement.
+    if (g_input.state == MouseState::PENDING_LMB) {
+        BeginDragVisuals();
+        g_input.state = MouseState::DRAGGING_LMB;
+    } else if (g_input.state == MouseState::PENDING_RMB) {
+        BeginDragVisuals();
+        g_input.state = MouseState::DRAGGING_RMB;
+    }
+
+    if (g_input.state == MouseState::IDLE) return;
+
+    // Accumulate drag distance (for click-vs-drag in OnMouseUp).
+    float mag = std::sqrt(delta[0] * delta[0] + delta[1] * delta[1]);
+    g_input.accum_dist += std::fabs(mag);
+
+    // Scale delta by mouse sensitivity.
+    float sens = GetMouseSensitivity();
+    float dx = delta[0] * sens;
+    float dy = delta[1] * sens;
+
+    // Dispatch based on our state.
+    switch (g_input.state) {
+    case MouseState::DRAGGING_LMB:
+        GUIAPI::CameraMouseLookMovement(dx, dy);
+        break;
+
+    case MouseState::DRAGGING_RMB:
+    case MouseState::BOTH_HELD:
+        GUIAPI::MouseMovement(dx, dy);
+        break;
+
+    default:
+        break;
+    }
+
+    // Reset cursor to saved position (mouselook behavior).
+    float saved[2] = { g_input.saved_cursor_x, g_input.saved_cursor_y };
+    void* wc = GUIAPI::WC_GetInstance();
+    if (wc) GUIAPI::WC_SetMousePosition(wc, saved, true);
+}
+
+// ── OnMouseUp detour (click handler) ────────────────────────────────────
+
+static void __fastcall OnMouseUpDetour(void* this_ecx, void* /*edx*/,
+                                        const float* pos, int button) {
+    if (!IsEnabled()) {
+        g_origOnMouseUp(this_ecx, pos, button);
+        return;
+    }
+
+    // Read the drag threshold from GUI.dll data section.
+    float threshold = 0.0f;
+    if (GUIAPI::g_guiBase) {
+        threshold = *reinterpret_cast<float*>(GUIAPI::g_guiBase + 0x1aeaf4);
+    }
+
+    // If a drag was active and moved far enough, suppress click handling.
+    bool wasDragging = (g_input.state == MouseState::DRAGGING_LMB ||
+                        g_input.state == MouseState::DRAGGING_RMB ||
+                        g_input.state == MouseState::BOTH_HELD);
+    if (wasDragging && g_input.accum_dist >= threshold) return;
+
+    // Otherwise, it's a click. Set stock handler fields so the original
+    // OnMouseUp sees drag_mode=0 and accum_dist=0 (clean click state).
+    auto* handler = reinterpret_cast<uint8_t*>(this_ecx);
+    *reinterpret_cast<int*>(handler + 0x08) = 0;
+    *reinterpret_cast<float*>(handler + 0x1C) = 0.0f;
+
+    g_origOnMouseUp(this_ecx, pos, button);
+}
+
+// ── EndDrag detour ──────────────────────────────────────────────────────
+//
+// Called by: (a) stock OnMouseRelease on any button release,
+//            (b) 3 GlobalSignals_c cleanup signals (window deactivate, etc.)
+// Handles ALL release transitions since OnMouseRelease is NOT hooked.
+
+static void __fastcall EndDragDetour(void* this_ecx, void* /*edx*/) {
+    if (!IsEnabled()) {
+        g_origEndDrag(this_ecx);
+        return;
+    }
+
+    // Check physical button state to determine which button was released.
+    bool lmb = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+    bool rmb = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
+
+    void* engine = N3API::GetEngineInstance ? N3API::GetEngineInstance() : nullptr;
+
+    switch (g_input.state) {
+    case MouseState::BOTH_HELD:
+        // Stop forward movement.
+        if (engine && GamecodeAPI::N3Msg_MovementChanged)
+            GamecodeAPI::N3Msg_MovementChanged(engine, kActionStopForward, 0, 0, true);
+
+        if (rmb && !lmb) {
+            // LMB released, RMB still held → continue char+cam steering.
+            g_input.state = MouseState::DRAGGING_RMB;
+            // Already in MouseMovement mode, no N3Msg change needed.
+        } else if (lmb && !rmb) {
+            // RMB released, LMB still held → switch to camera orbit.
+            GUIAPI::EndMouseLook();
+            g_input.state = MouseState::DRAGGING_LMB;
+        } else {
+            // Both released (or cleanup signal) → full teardown.
+            GUIAPI::EndMouseLook();
+            EndDragVisuals();
+            g_input.state = MouseState::IDLE;
+        }
+        break;
+
+    case MouseState::DRAGGING_LMB:
+        if (!lmb) {
+            GUIAPI::EndCameraMouseLook();
+            EndDragVisuals();
+            g_input.state = MouseState::IDLE;
+        }
+        break;
+
+    case MouseState::DRAGGING_RMB:
+        if (!rmb) {
+            GUIAPI::EndMouseLook();
+            EndDragVisuals();
+            g_input.state = MouseState::IDLE;
+        }
+        break;
+
+    case MouseState::PENDING_LMB:
+    case MouseState::PENDING_RMB:
+        g_input.state = MouseState::IDLE;
+        break;
+
+    case MouseState::IDLE:
+        break;
+    }
+
+    // Always reset stock handler fields so any code reading them sees IDLE.
+    auto* handler = reinterpret_cast<uint8_t*>(this_ecx);
+    *reinterpret_cast<int*>(handler + 0x08) = 0;
+    *reinterpret_cast<int*>(handler + 0x0C) = 0;
+    *reinterpret_cast<int*>(handler + 0x10) = static_cast<int>(0xFFFFFFFF);
 }
 
 // ── Public init ─────────────────────────────────────────────────────────
@@ -432,58 +709,116 @@ bool InitCameraHooks() {
         return false;
     }
 
-    // Gamecode API is optional — if resolution fails, the RMB-align and
-    // follow-camera still work, but the "both mouse buttons → forward"
-    // feature is disabled. Log and continue.
     if (!GamecodeAPI::Init()) {
         Log("[camera] Gamecode API init failed — both-mouse-forward disabled");
     }
 
-    // Hook CalcSteering on CameraVehicleFixedThird_t.
-    void* calcSteeringAddr = ResolveRVA("N3.dll", kCalcSteeringRVA);
-    if (!calcSteeringAddr) {
-        Log("[camera] N3.dll CalcSteering RVA invalid");
+    if (!GUIAPI::Init()) {
+        Log("[camera] GUI API init failed — input handler hooks disabled");
         return false;
     }
-    auto* bytes = static_cast<uint8_t*>(calcSteeringAddr);
-    Log("[camera] CalcSteering at %p, prologue: %02X %02X %02X %02X %02X",
-        calcSteeringAddr, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4]);
 
-    void* trampoline = nullptr;
-    if (!InstallHook(calcSteeringAddr, reinterpret_cast<void*>(&CalcSteeringDetour),
-                     &trampoline)) {
-        Log("[camera] failed to hook CalcSteering");
-        return false;
-    }
-    g_origCalcSteering = reinterpret_cast<FnCalcSteering>(trampoline);
-
-    Log("[camera] CalcSteering hook installed — yaw follow active");
-
-    // Hook the AO exe's WndProc to fix mouse-button state-machine:
-    //   - Issue A: LMB-down while RMB-held shouldn't kick the game out
-    //     of RMB-turn mode.
-    //   - Issue B: releasing one button while the other stays held
-    //     should fall back to the remaining button's mode, not idle.
-    // WndProc lives at AnarchyOnline.exe RVA 0x00004a66. Prologue is
-    // `B8 imm32; CALL __SEH_prolog4` — the MOV-EAX-imm32 pattern we
-    // already whitelist.
-    if (HMODULE exe = GetModuleHandleA(nullptr)) {
-        void* wndProcAddr = reinterpret_cast<uint8_t*>(exe) + 0x4a66;
-        auto* mb = static_cast<uint8_t*>(wndProcAddr);
-        Log("[camera] AO WndProc at %p, prologue: "
-            "%02X %02X %02X %02X %02X",
-            wndProcAddr, mb[0], mb[1], mb[2], mb[3], mb[4]);
-        void* wptramp = nullptr;
-        if (InstallHook(wndProcAddr,
-                        reinterpret_cast<void*>(&WndProcDetour),
-                        &wptramp)) {
-            g_origWndProc = reinterpret_cast<FnWndProc>(wptramp);
-            Log("[camera] WndProc hook installed — mouse state fixes active");
-        } else {
-            Log("[camera] failed to hook WndProc");
+    // ── Hook 1: CalcSteering (N3.dll) ───────────────────────────────
+    {
+        void* addr = ResolveRVA("N3.dll", kCalcSteeringRVA);
+        if (!addr) {
+            Log("[camera] CalcSteering RVA invalid");
+            return false;
         }
+        auto* bytes = static_cast<uint8_t*>(addr);
+        Log("[camera] CalcSteering at %p, prologue: %02X %02X %02X %02X %02X",
+            addr, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4]);
+
+        void* tramp = nullptr;
+        if (!InstallHook(addr, reinterpret_cast<void*>(&CalcSteeringDetour), &tramp)) {
+            Log("[camera] failed to hook CalcSteering");
+            return false;
+        }
+        g_origCalcSteering = reinterpret_cast<FnCalcSteering>(tramp);
+        Log("[camera] CalcSteering hook installed");
     }
 
+    // ── Hook 2: OnMouseDown (GUI.dll) ───────────────────────────────
+    {
+        void* addr = ResolveRVA("GUI.dll", kOnMouseDownRVA);
+        if (!addr) {
+            Log("[camera] OnMouseDown RVA invalid");
+            return false;
+        }
+        auto* bytes = static_cast<uint8_t*>(addr);
+        Log("[camera] OnMouseDown at %p, prologue: %02X %02X %02X %02X %02X",
+            addr, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4]);
+
+        void* tramp = nullptr;
+        if (!InstallHook(addr, reinterpret_cast<void*>(&OnMouseDownDetour), &tramp)) {
+            Log("[camera] failed to hook OnMouseDown");
+            return false;
+        }
+        g_origOnMouseDown = reinterpret_cast<FnOnMouseDown>(tramp);
+        Log("[camera] OnMouseDown hook installed");
+    }
+
+    // ── Hook 3: OnMouseMove (GUI.dll) ───────────────────────────────
+    {
+        void* addr = ResolveRVA("GUI.dll", kOnMouseMoveRVA);
+        if (!addr) {
+            Log("[camera] OnMouseMove RVA invalid");
+            return false;
+        }
+        auto* bytes = static_cast<uint8_t*>(addr);
+        Log("[camera] OnMouseMove at %p, prologue: %02X %02X %02X %02X %02X",
+            addr, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4]);
+
+        void* tramp = nullptr;
+        if (!InstallHook(addr, reinterpret_cast<void*>(&OnMouseMoveDetour), &tramp)) {
+            Log("[camera] failed to hook OnMouseMove");
+            return false;
+        }
+        g_origOnMouseMove = reinterpret_cast<FnOnMouseMove>(tramp);
+        Log("[camera] OnMouseMove hook installed");
+    }
+
+    // ── Hook 4: OnMouseUp (GUI.dll) ─────────────────────────────────
+    {
+        void* addr = ResolveRVA("GUI.dll", kOnMouseUpRVA);
+        if (!addr) {
+            Log("[camera] OnMouseUp RVA invalid");
+            return false;
+        }
+        auto* bytes = static_cast<uint8_t*>(addr);
+        Log("[camera] OnMouseUp at %p, prologue: %02X %02X %02X %02X %02X",
+            addr, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4]);
+
+        void* tramp = nullptr;
+        if (!InstallHook(addr, reinterpret_cast<void*>(&OnMouseUpDetour), &tramp)) {
+            Log("[camera] failed to hook OnMouseUp");
+            return false;
+        }
+        g_origOnMouseUp = reinterpret_cast<FnOnMouseUp>(tramp);
+        Log("[camera] OnMouseUp hook installed");
+    }
+
+    // ── Hook 5: EndDrag (GUI.dll) ───────────────────────────────────
+    {
+        void* addr = ResolveRVA("GUI.dll", kEndDragRVA);
+        if (!addr) {
+            Log("[camera] EndDrag RVA invalid");
+            return false;
+        }
+        auto* bytes = static_cast<uint8_t*>(addr);
+        Log("[camera] EndDrag at %p, prologue: %02X %02X %02X %02X %02X",
+            addr, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4]);
+
+        void* tramp = nullptr;
+        if (!InstallHook(addr, reinterpret_cast<void*>(&EndDragDetour), &tramp)) {
+            Log("[camera] failed to hook EndDrag");
+            return false;
+        }
+        g_origEndDrag = reinterpret_cast<FnEndDrag>(tramp);
+        Log("[camera] EndDrag hook installed");
+    }
+
+    Log("[camera] All hooks installed — replacement input handler active");
     return true;
 }
 
