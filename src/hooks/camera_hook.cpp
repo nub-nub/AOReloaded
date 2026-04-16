@@ -242,6 +242,15 @@ struct InputState {
 
 static InputState g_input;
 
+// Check if a forward-movement key is physically held. Covers common
+// bindings (W, Up arrow, Numpad 8). Not perfect for exotic rebinds,
+// but handles the vast majority of configurations.
+static bool IsForwardKeyHeld() {
+    return (GetAsyncKeyState('W') & 0x8000) != 0 ||
+           (GetAsyncKeyState(VK_UP) & 0x8000) != 0 ||
+           (GetAsyncKeyState(VK_NUMPAD8) & 0x8000) != 0;
+}
+
 // Check if our camera system is enabled.
 static bool IsEnabled() {
     AOVariant v{};
@@ -326,6 +335,11 @@ static bool  g_hasLastPos  = false;
 // Edge detection for RMB-align (one-shot per press).
 static bool  g_rmbWasHeld  = false;
 
+// Unified forward-movement state. Evaluated every frame from the
+// combination of mouse buttons and keyboard keys. Only CalcSteering
+// dispatches StartForward/StopForward — OnMouseDown and EndDrag do not.
+static bool  g_wasMovingForward = false;
+
 static int __fastcall CalcSteeringDetour(void* vehicle, void* /*edx*/, void* result) {
     void* engine = N3API::GetEngineInstance ? N3API::GetEngineInstance() : nullptr;
     if (!engine) goto call_original;
@@ -385,6 +399,40 @@ static int __fastcall CalcSteeringDetour(void* vehicle, void* /*edx*/, void* res
                     }
                 }
             }
+        }
+    }
+
+    // ── Unified forward-movement evaluation ────────────────────────
+    //
+    // Forward movement is a derived signal: move forward if EITHER both
+    // mouse buttons are held OR a forward key is physically pressed.
+    // This is the sole dispatch point for StartForward/StopForward —
+    // OnMouseDown and EndDrag only manage mouse state, not movement.
+    {
+        bool shouldForward = (g_input.state == MouseState::BOTH_HELD) ||
+                             IsForwardKeyHeld();
+
+        if (shouldForward && !g_wasMovingForward) {
+            // Rising edge: begin forward movement.
+            if (GamecodeAPI::N3Msg_MovementChanged)
+                GamecodeAPI::N3Msg_MovementChanged(engine,
+                    kActionStartForward, 0.0f, 0.0f, true);
+            g_wasMovingForward = true;
+        } else if (!shouldForward && g_wasMovingForward) {
+            // Falling edge: stop forward movement.
+            if (GamecodeAPI::N3Msg_MovementChanged)
+                GamecodeAPI::N3Msg_MovementChanged(engine,
+                    kActionStopForward, 0.0f, 0.0f, true);
+            g_wasMovingForward = false;
+        } else if (shouldForward && g_wasMovingForward
+                   && g_input.state == MouseState::BOTH_HELD) {
+            // Self-healing: while BOTH_HELD is active, re-assert forward
+            // with sync=false (local only, no network packet). This
+            // overrides any external StopForward the keyboard may have
+            // sent (e.g., user released W while both buttons are held).
+            if (GamecodeAPI::N3Msg_MovementChanged)
+                GamecodeAPI::N3Msg_MovementChanged(engine,
+                    kActionStartForward, 0.0f, 0.0f, false);
         }
     }
 
@@ -514,8 +562,6 @@ static void __fastcall OnMouseDownDetour(void* this_ecx, void* /*edx*/,
     *reinterpret_cast<int*>(handler + 0x0C) = 0;
     *reinterpret_cast<int*>(handler + 0x10) = static_cast<int>(0xFFFFFFFF);
 
-    void* engine = N3API::GetEngineInstance ? N3API::GetEngineInstance() : nullptr;
-
     if (button == 1) {  // LMB
         switch (g_input.state) {
         case MouseState::PENDING_RMB:
@@ -523,9 +569,8 @@ static void __fastcall OnMouseDownDetour(void* this_ecx, void* /*edx*/,
             // RMB already active → enter BOTH_HELD.
             if (g_input.state == MouseState::PENDING_RMB)
                 BeginDragVisuals();
-            // Already in MouseMovement mode, just add forward.
-            if (engine && GamecodeAPI::N3Msg_MovementChanged)
-                GamecodeAPI::N3Msg_MovementChanged(engine, kActionStartForward, 0, 0, true);
+            // Forward movement is handled by CalcSteering's unified
+            // evaluation — not dispatched here.
             g_input.state = MouseState::BOTH_HELD;
             break;
 
@@ -548,8 +593,8 @@ static void __fastcall OnMouseDownDetour(void* this_ecx, void* /*edx*/,
                 // End camera orbit mode before switching to char steer.
                 GUIAPI::EndCameraMouseLook();
             }
-            if (engine && GamecodeAPI::N3Msg_MovementChanged)
-                GamecodeAPI::N3Msg_MovementChanged(engine, kActionStartForward, 0, 0, true);
+            // Forward movement is handled by CalcSteering's unified
+            // evaluation — not dispatched here.
             g_input.state = MouseState::BOTH_HELD;
             break;
 
@@ -660,13 +705,12 @@ static void __fastcall EndDragDetour(void* this_ecx, void* /*edx*/) {
     bool lmb = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
     bool rmb = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
 
-    void* engine = N3API::GetEngineInstance ? N3API::GetEngineInstance() : nullptr;
-
     switch (g_input.state) {
     case MouseState::BOTH_HELD:
-        // Stop forward movement.
-        if (engine && GamecodeAPI::N3Msg_MovementChanged)
-            GamecodeAPI::N3Msg_MovementChanged(engine, kActionStopForward, 0, 0, true);
+        // Forward movement is NOT stopped here — CalcSteering's unified
+        // evaluation handles it. When state leaves BOTH_HELD, the next
+        // CalcSteering frame sees shouldForward change and dispatches
+        // StopForward only if no forward key is held either.
 
         if (rmb && !lmb) {
             // LMB released, RMB still held → continue char+cam steering.
