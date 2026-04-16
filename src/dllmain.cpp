@@ -18,6 +18,7 @@
 #include "ao/game_api.h"
 #include "hooks/input_handler.h"
 #include "hooks/camera_hook.h"
+#include "hooks/numpad_fix.h"
 
 #include <windows.h>
 
@@ -93,6 +94,11 @@ DWORD WINAPI DeferredInit(LPVOID /*param*/) {
         // Install camera hooks (N3.dll CalcSteering). Depends on input handler.
         if (!aor::InitCameraHooks()) {
             aor::Log("[init] camera hooks failed — running without camera mod");
+        }
+
+        // Install numpad text input fix (GUI.dll CheckInput hook).
+        if (!aor::InitNumpadFix()) {
+            aor::Log("[init] numpad fix failed — numpad keys won't type in chat");
         }
     } else {
         aor::Log("[init] timed out waiting for game world");

@@ -84,6 +84,7 @@ The game's options panel is pure data-driven XML at `client/cd_image/gui/Default
 - **GUI.dll API resolution**: N3Msg dispatch functions (`CameraMouseLookMovement`, `MouseMovement`, `EndCameraMouseLook`, `EndMouseLook`) resolved by reading cached function pointers from GUI.dll's data section at known RVAs. `WindowController_c` and `AFCM` functions resolved by direct RVA. See `GUIAPI` namespace.
 - **WndProc hook removed**: the old WndProc hook (AnarchyOnline.exe RVA 0x4a66) is no longer needed — all mouse button state management is handled at the callback level.
 - **Options panel SSO limit**: DValue names bound to `OptionCheckBox`/`OptionSlider` MUST be ≤ 15 chars. `AOString::FromShort` silently returns an empty string for longer names, which corrupts the registry and hangs the slider widget. Sliders also expect Int (not Float) DValues — Float-bound sliders render with no knob and hang on click.
+- **Numpad text input fix** (`src/hooks/numpad_fix.cpp`): hooks `InputConfig_t::CheckInput` (GUI.dll RVA `0x1a4c1`, prologue `55 8B EC 51 53`). When text input mode is active (`this+0x67` or `this+0x27`), translates numpad keys (AO codes 0x42-0x50) to characters and injects via `WindowController_c::HandleTextInput`. Consumes the key event to prevent action bindings from firing. Respects AFCM redirect mode (hotkey assignment). Toggled by `AOR_NumpadFix` DValue.
 
 ## Caveats / footguns
 

@@ -157,6 +157,82 @@ The game uses a type-safe signal/slot system (`SignalBase_c` / `SlotBase_c` / `S
 - `ActionViewMouseHandler_c_DRAG_THRESHOLD` @ `0x101aeaf4` — float, click-vs-drag distance threshold used in OnMouseUp
 - `ActionViewMouseHandler_c_vftable` @ `0x101aeb2c` — vtable (just SignalTarget_c destructor)
 
+## GUI.dll — Keyboard Input Pipeline
+
+### InputConfig_t — Keyboard Input Dispatcher
+
+Singleton, 0x1D0 bytes. `InputConfig_t::GetInstance()` @ `0x1001b2d5` (`__cdecl`).
+
+**Key fields:**
+```
++0x0C: uint8_t  afcm_redirect_mode  (non-zero = hotkey assignment mode, input sent via AFCM)
++0x24: uint8_t  mode_flags[N]       (indexed by mode ID; mode 0 at +0x24, mode 3 at +0x27)
++0x64: uint8_t  dynamic_modes[N]    (indexed by mode ID; mode 3 at +0x67 = text input mode)
++0x120: uint32_t last_key_code      (stored key for repeat detection)
++0x124: uint8_t  key_state[N]       (per-keycode repeat tracking array)
+```
+
+**`SetTextInputMode(bool)`** @ `0x10019d21` — writes `this+0x67` (dynamic text input mode flag). Set when a text input widget (chat, search box) gains keyboard focus.
+
+**`CheckMode(int mode)`** @ `0x10019b4c` — returns `this[mode+0x24] || this[mode+0x64]`. For mode 3: checks `this[0x27]` (static) and `this[0x67]` (dynamic text input).
+
+### InputInfo_t — Key Event Structure
+
+```
++0x00: uint32_t key_and_flags
+         Bits 0-16:   AO internal key code
+         Bit 17:      Ctrl modifier (0x20000)
+         Bit 18:      Alt modifier (0x40000)
+         Bit 19:      Shift modifier (0x80000)
+         Bit 20:      Key-up flag (0x100000)
++0x04: uint8_t  is_repeat (0 = initial press, non-zero = held/repeat)
+```
+
+### CheckInput flow (RVA `0x1a4c1`, prologue `55 8B EC 51 53`)
+
+```
+CheckInput(InputInfo_t& info):
+  1. If afcm_redirect_mode (this+0xc): forward key via AFCM network → return
+  2. Call ProcessInput(key, repeat_mode) to match against action bindings
+  3. If ProcessInput consumed the key → return (action executed)
+  4. If not consumed AND CheckMode(3) → forward to HandleKeyDown/HandleKeyUp
+     (dispatches to focused view's KeyDown handler via signal system)
+```
+
+**Bug:** Numpad keys are always consumed at step 2 (bound to camera/movement actions) even when text input mode is active. They never reach step 4 or the text input widget.
+
+### ProcessInput (RVA `0x1a31a`)
+
+Iterates the action binding list, matching key codes to commands. Calls `FUN_100180fe` for pre-processing (some bindings have a `+0x70` flag that enables them in text mode). Returns true if a binding matched and executed.
+
+### AO Internal Key Codes — Numpad
+
+Derived from `BrowserModule_c::TranslateKeyCode` (RVA `0x10a751`):
+
+| AO Code | VK Code | Character |
+|---------|---------|-----------|
+| 0x42 | VK_DIVIDE (0x6F) | `/` |
+| 0x43 | VK_MULTIPLY (0x6A) | `*` |
+| 0x44 | VK_SUBTRACT (0x6D) | `-` |
+| 0x45 | VK_ADD (0x6B) | `+` |
+| 0x46 | VK_NUMPAD0 (0x60) | `0` |
+| 0x47 | VK_NUMPAD1 (0x61) | `1` |
+| 0x48 | VK_NUMPAD2 (0x62) | `2` |
+| 0x49 | VK_NUMPAD3 (0x63) | `3` |
+| 0x4A | VK_NUMPAD4 (0x64) | `4` |
+| 0x4B | VK_NUMPAD5 (0x65) | `5` |
+| 0x4C | VK_NUMPAD6 (0x66) | `6` |
+| 0x4D | VK_NUMPAD7 (0x67) | `7` |
+| 0x4E | VK_NUMPAD8 (0x68) | `8` |
+| 0x4F | VK_NUMPAD9 (0x69) | `9` |
+| 0x50 | VK_DECIMAL (0x6E) | `.` |
+
+Other notable ranges: F1-F24 = 0x27-0x3E, Letters A-Z = 0x52-0x6B, Digits 0-9 = 0x6C-0x75.
+
+### HandleTextInput (RVA `0x156f92`)
+
+`WindowController_c::HandleTextInput(std::string const&)` — dispatches through signal at focused_view+0x88, then calls vtable+0x50. The `std::string` parameter has the same ABI layout as `AOString` (MSVC 2010).
+
 ## Hook engine (`src/hooks/hook_engine.cpp`)
 
 Prologue whitelist includes `B8 xx xx xx xx` (`mov eax, imm32`) — the 5-byte MSVC SEH-prolog entry thunk used by functions with try/catch. The instruction is IP-independent and copies cleanly into the trampoline.

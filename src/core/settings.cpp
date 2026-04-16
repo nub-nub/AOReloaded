@@ -46,6 +46,7 @@ static SettingDef g_settings[] = {
     { "AOR_CYawSpd",  SettingType::Int,  2,       2,       1,  10  },
     { "AOR_MouseRun", SettingType::Bool, 1,       1,       0,   1  },
     { "AOR_DebugLog", SettingType::Bool, 0,       0,       0,   1  },
+    { "AOR_NumpadFix", SettingType::Bool, 1,       1,       0,   1  },
 };
 
 static constexpr int kSettingCount = sizeof(g_settings) / sizeof(g_settings[0]);
@@ -318,6 +319,10 @@ static const char kAorXmlBlock[] =
     "        <OptionCheckBox label=\"LMB+RMB mouse-run (hold both mouse buttons to run forward - requires WoW camera enabled)\""
     " layout_borders=\"Rect(10,0,0,0)\" opt_type=\"variant\" opt_variable=\"AOR_MouseRun\"/>\n"
     "\n"
+    "        <TextView value=\"Input\" layout_borders=\"Rect(0,10,0,3)\" />\n"
+    "        <OptionCheckBox label=\"Numpad keys type in chat fix\""
+    " layout_borders=\"Rect(10,0,0,0)\" opt_type=\"variant\" opt_variable=\"AOR_NumpadFix\"/>\n"
+    "\n"
     "        <TextView value=\"Debug\" layout_borders=\"Rect(0,10,0,3)\" />\n"
     "        <OptionCheckBox label=\"Enable debug logging (AOReloaded.log, requires restart)\""
     " layout_borders=\"Rect(10,0,0,0)\" opt_type=\"variant\" opt_variable=\"AOR_DebugLog\"/>\n"
@@ -327,93 +332,112 @@ static const char kAorXmlBlock[] =
     "    </ScrollViewChild>\n"
     "  </ScrollView>\n";
 
-// Read the active GUI name from MainPrefs.xml. The value is stored as
-// e.g. value="&quot;Default&quot;", so we need to strip the escaped quotes.
-// Falls back to "Default" if anything goes wrong.
-static bool GetActiveGuiName(char* out, int outSize) {
-    char mainPrefsPath[MAX_PATH];
-    if (!BuildIniPathNarrow(mainPrefsPath, MAX_PATH)) return false;
+// ── Multi-path Root.xml patching ───────────────────────────────────────
+//
+// Custom GUIs in AO live in:
+//   %LocalAppData%\Funcom\Anarchy Online\<hash>\<sub>\Gui\<GUIName>\
+// The game loads cd_image/gui/Default/ first, then overlays files from
+// the custom GUI directory. If the custom GUI has its own
+// OptionPanel/Root.xml, that one takes precedence.
+//
+// Rather than trying to determine the active GUI name (which is stored
+// in the AppData Prefs.xml, not in MainPrefs.xml), we simply find and
+// patch EVERY OptionPanel/Root.xml that exists — both in cd_image and
+// in every AppData GUI directory. PatchSingleRootXml is safe to call on
+// any file: it skips non-existent paths and is idempotent.
 
-    // Replace "AOReloaded.ini" with "cd_image\gui\Default\MainPrefs.xml"
-    // by finding the last backslash in the ini path.
+// Get the client directory (exe dir with trailing backslash).
+static bool GetClientDir(char* out, int outSize) {
+    if (!BuildIniPathNarrow(out, outSize)) return false;
     char* lastSlash = nullptr;
-    for (char* p = mainPrefsPath; *p; ++p) {
+    for (char* p = out; *p; ++p) {
         if (*p == '\\' || *p == '/') lastSlash = p;
     }
     if (!lastSlash) return false;
     *(lastSlash + 1) = '\0';
+    return true;
+}
 
-    char fullPath[MAX_PATH];
-    _snprintf_s(fullPath, sizeof(fullPath), _TRUNCATE,
-                "%scd_image\\gui\\Default\\MainPrefs.xml", mainPrefsPath);
-
-    // Read the file and search for GUIName value.
-    HANDLE hFile = CreateFileA(fullPath, GENERIC_READ, FILE_SHARE_READ,
+// Inject the AOReloaded block into a single Root.xml file if missing.
+static void PatchSingleRootXml(const char* xmlPath) {
+    HANDLE hFile = CreateFileA(xmlPath, GENERIC_READ, FILE_SHARE_READ,
                                nullptr, OPEN_EXISTING, 0, nullptr);
-    if (hFile == INVALID_HANDLE_VALUE) return false;
+    if (hFile == INVALID_HANDLE_VALUE) return;  // file doesn't exist, skip
 
     DWORD fileSize = GetFileSize(hFile, nullptr);
-    if (fileSize == INVALID_FILE_SIZE || fileSize > 256 * 1024) {
+    if (fileSize == INVALID_FILE_SIZE || fileSize > 1024 * 1024) {
         CloseHandle(hFile);
-        return false;
+        return;
     }
 
-    auto* buf = new(std::nothrow) char[fileSize + 1];
-    if (!buf) { CloseHandle(hFile); return false; }
+    auto* buf = new(std::nothrow) char[fileSize + sizeof(kAorXmlBlock) + 1];
+    if (!buf) { CloseHandle(hFile); return; }
 
     DWORD bytesRead = 0;
     ReadFile(hFile, buf, fileSize, &bytesRead, nullptr);
     CloseHandle(hFile);
     buf[bytesRead] = '\0';
 
-    // Find: name="GUIName" value="&quot;SomeName&quot;"
-    const char* pos = std::strstr(buf, "\"GUIName\"");
-    if (!pos) { delete[] buf; return false; }
-
-    // Find the value= attribute after GUIName.
-    const char* valAttr = std::strstr(pos, "value=\"");
-    if (!valAttr) { delete[] buf; return false; }
-    valAttr += 7;  // skip past value="
-
-    // The value is wrapped in &quot; entities: &quot;Default&quot;
-    // Or it might just be a plain string. Handle both.
-    const char* nameStart = valAttr;
-    if (std::strncmp(nameStart, "&quot;", 6) == 0)
-        nameStart += 6;  // skip &quot;
-
-    // Find the end — either &quot; or "
-    const char* nameEnd = std::strstr(nameStart, "&quot;");
-    if (!nameEnd) nameEnd = std::strchr(nameStart, '"');
-    if (!nameEnd || nameEnd == nameStart) { delete[] buf; return false; }
-
-    int nameLen = static_cast<int>(nameEnd - nameStart);
-    if (nameLen >= outSize) nameLen = outSize - 1;
-    std::memcpy(out, nameStart, nameLen);
-    out[nameLen] = '\0';
-
-    delete[] buf;
-    return true;
-}
-
-static bool BuildRootXmlPath(char* out, int outSize) {
-    // Determine the active GUI name from MainPrefs.xml.
-    char guiName[128] = "Default";
-    GetActiveGuiName(guiName, sizeof(guiName));
-
-    char basePath[MAX_PATH];
-    if (!BuildIniPathNarrow(basePath, MAX_PATH)) return false;
-
-    // Strip filename from ini path to get the client directory.
-    char* lastSlash = nullptr;
-    for (char* p = basePath; *p; ++p) {
-        if (*p == '\\' || *p == '/') lastSlash = p;
+    // If an old AOReloaded block exists, strip it out. We always re-inject
+    // the current version so that new settings appear automatically on
+    // update without users needing to reconfigure. User values are safe —
+    // they live in AOReloaded.ini, not in the XML.
+    char* oldStart = std::strstr(buf, "<ScrollView");
+    while (oldStart) {
+        // Check if THIS ScrollView is the AOReloaded one.
+        char* tagEnd = std::strchr(oldStart, '>');
+        if (tagEnd && std::strstr(oldStart, "label=\"AOReloaded\"") &&
+            std::strstr(oldStart, "label=\"AOReloaded\"") < tagEnd + 1) {
+            // Found it. Find the matching </ScrollView>.
+            char* closeTag = std::strstr(oldStart, "</ScrollView>");
+            if (closeTag) {
+                closeTag += 13;  // skip past </ScrollView>
+                // Skip trailing whitespace/newline.
+                while (*closeTag == '\n' || *closeTag == '\r') ++closeTag;
+                // Remove by shifting the rest of the buffer over.
+                std::memmove(oldStart, closeTag, std::strlen(closeTag) + 1);
+                Log("[settings] removed old AOReloaded block from: %s", xmlPath);
+            }
+            break;
+        }
+        oldStart = std::strstr(oldStart + 1, "<ScrollView");
     }
-    if (!lastSlash) return false;
-    *(lastSlash + 1) = '\0';
 
-    _snprintf_s(out, outSize, _TRUNCATE,
-                "%scd_image\\gui\\%s\\OptionPanel\\Root.xml", basePath, guiName);
-    return true;
+    char* endTag = std::strstr(buf, "</root>");
+    if (!endTag) {
+        Log("[settings] missing </root>: %s", xmlPath);
+        delete[] buf;
+        return;
+    }
+
+    size_t prefixLen = static_cast<size_t>(endTag - buf);
+    size_t blockLen = std::strlen(kAorXmlBlock);
+    size_t suffixLen = std::strlen(endTag);
+
+    auto* newBuf = new(std::nothrow) char[prefixLen + blockLen + suffixLen + 1];
+    if (!newBuf) { delete[] buf; return; }
+
+    std::memcpy(newBuf, buf, prefixLen);
+    std::memcpy(newBuf + prefixLen, kAorXmlBlock, blockLen);
+    std::memcpy(newBuf + prefixLen + blockLen, endTag, suffixLen);
+    size_t totalLen = prefixLen + blockLen + suffixLen;
+    newBuf[totalLen] = '\0';
+    delete[] buf;
+
+    hFile = CreateFileA(xmlPath, GENERIC_WRITE, 0,
+                        nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        Log("[settings] cannot write: %s (%lu)", xmlPath, GetLastError());
+        delete[] newBuf;
+        return;
+    }
+
+    DWORD written = 0;
+    WriteFile(hFile, newBuf, static_cast<DWORD>(totalLen), &written, nullptr);
+    CloseHandle(hFile);
+    delete[] newBuf;
+
+    Log("[settings] injected AOReloaded tab: %s", xmlPath);
 }
 
 // ── Public API ─────────────────────────────────────────────────────────
@@ -425,98 +449,121 @@ bool IsDebugLogEnabled() {
 }
 
 void PatchOptionsXml() {
-    char xmlPath[MAX_PATH];
-    if (!BuildRootXmlPath(xmlPath, MAX_PATH)) {
-        Log("[settings] could not resolve Root.xml path");
-        return;
-    }
-    Log("[settings] options panel XML: %s", xmlPath);
-
-    // Read the entire file.
-    HANDLE hFile = CreateFileA(xmlPath, GENERIC_READ, FILE_SHARE_READ,
-                               nullptr, OPEN_EXISTING, 0, nullptr);
-    if (hFile == INVALID_HANDLE_VALUE) {
-        Log("[settings] Root.xml not found at %s", xmlPath);
+    char clientDir[MAX_PATH];
+    if (!GetClientDir(clientDir, MAX_PATH)) {
+        Log("[settings] could not resolve client directory");
         return;
     }
 
-    DWORD fileSize = GetFileSize(hFile, nullptr);
-    if (fileSize == INVALID_FILE_SIZE || fileSize > 1024 * 1024) {
-        Log("[settings] Root.xml size invalid (%lu)", fileSize);
-        CloseHandle(hFile);
-        return;
+    // 1. Always patch Default in cd_image.
+    {
+        char path[MAX_PATH];
+        _snprintf_s(path, sizeof(path), _TRUNCATE,
+                    "%scd_image\\gui\\Default\\OptionPanel\\Root.xml", clientDir);
+        PatchSingleRootXml(path);
     }
 
-    // +1 for null terminator, + sizeof block for potential injection.
-    auto* buf = new(std::nothrow) char[fileSize + sizeof(kAorXmlBlock) + 1];
-    if (!buf) {
-        CloseHandle(hFile);
-        return;
+    // 2. Scan every GUI in cd_image/gui/ (covers non-Default GUIs shipped
+    //    alongside the client).
+    {
+        char searchPattern[MAX_PATH];
+        _snprintf_s(searchPattern, sizeof(searchPattern), _TRUNCATE,
+                    "%scd_image\\gui\\*", clientDir);
+
+        WIN32_FIND_DATAA entry;
+        HANDLE hFind = FindFirstFileA(searchPattern, &entry);
+        if (hFind != INVALID_HANDLE_VALUE) {
+            do {
+                if (!(entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+                if (entry.cFileName[0] == '.') continue;
+                if (_stricmp(entry.cFileName, "Default") == 0) continue;  // already done
+
+                char path[MAX_PATH];
+                _snprintf_s(path, sizeof(path), _TRUNCATE,
+                            "%scd_image\\gui\\%s\\OptionPanel\\Root.xml",
+                            clientDir, entry.cFileName);
+                PatchSingleRootXml(path);
+            } while (FindNextFileA(hFind, &entry));
+            FindClose(hFind);
+        }
     }
 
-    DWORD bytesRead = 0;
-    ReadFile(hFile, buf, fileSize, &bytesRead, nullptr);
-    CloseHandle(hFile);
-    buf[bytesRead] = '\0';
+    // 3. Scan %LocalAppData%\Funcom\Anarchy Online\<hash>\<sub>\Gui\*\
+    //    for custom GUIs installed via the standard AO user-install method.
+    //    Structure: <hash>\<sub>\Gui\<GUIName>\OptionPanel\Root.xml
+    {
+        char appDataBase[MAX_PATH];
+        DWORD len = GetEnvironmentVariableA("LOCALAPPDATA", appDataBase, MAX_PATH);
+        if (len == 0 || len >= MAX_PATH) goto done_appdata;
 
-    // Check if AOReloaded tab already exists.
-    if (std::strstr(buf, "label=\"AOReloaded\"")) {
-        Log("[settings] Root.xml already has AOReloaded tab");
-        delete[] buf;
-        return;
+        char hashPattern[MAX_PATH];
+        _snprintf_s(hashPattern, sizeof(hashPattern), _TRUNCATE,
+                    "%s\\Funcom\\Anarchy Online\\*", appDataBase);
+
+        WIN32_FIND_DATAA hashEntry;
+        HANDLE hHash = FindFirstFileA(hashPattern, &hashEntry);
+        if (hHash == INVALID_HANDLE_VALUE) goto done_appdata;
+
+        do {
+            if (!(hashEntry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+            if (hashEntry.cFileName[0] == '.') continue;
+
+            // Enumerate subdirectories (e.g. "Anarchy Online" or "client").
+            char subPattern[MAX_PATH];
+            _snprintf_s(subPattern, sizeof(subPattern), _TRUNCATE,
+                        "%s\\Funcom\\Anarchy Online\\%s\\*",
+                        appDataBase, hashEntry.cFileName);
+
+            WIN32_FIND_DATAA subEntry;
+            HANDLE hSub = FindFirstFileA(subPattern, &subEntry);
+            if (hSub == INVALID_HANDLE_VALUE) continue;
+
+            do {
+                if (!(subEntry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+                if (subEntry.cFileName[0] == '.') continue;
+
+                // Enumerate GUI names inside this Gui folder.
+                char guiPattern[MAX_PATH];
+                _snprintf_s(guiPattern, sizeof(guiPattern), _TRUNCATE,
+                            "%s\\Funcom\\Anarchy Online\\%s\\%s\\Gui\\*",
+                            appDataBase, hashEntry.cFileName, subEntry.cFileName);
+
+                WIN32_FIND_DATAA guiEntry;
+                HANDLE hGui = FindFirstFileA(guiPattern, &guiEntry);
+                if (hGui == INVALID_HANDLE_VALUE) continue;
+
+                do {
+                    if (!(guiEntry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+                    if (guiEntry.cFileName[0] == '.') continue;
+
+                    char path[MAX_PATH];
+                    _snprintf_s(path, sizeof(path), _TRUNCATE,
+                                "%s\\Funcom\\Anarchy Online\\%s\\%s"
+                                "\\Gui\\%s\\OptionPanel\\Root.xml",
+                                appDataBase, hashEntry.cFileName,
+                                subEntry.cFileName, guiEntry.cFileName);
+                    PatchSingleRootXml(path);
+                } while (FindNextFileA(hGui, &guiEntry));
+                FindClose(hGui);
+            } while (FindNextFileA(hSub, &subEntry));
+            FindClose(hSub);
+        } while (FindNextFileA(hHash, &hashEntry));
+        FindClose(hHash);
     }
-
-    // Find </root> and insert our block before it.
-    char* endTag = std::strstr(buf, "</root>");
-    if (!endTag) {
-        Log("[settings] Root.xml missing </root> — cannot inject");
-        delete[] buf;
-        return;
-    }
-
-    // Build the new file content: [before </root>] + our block + </root>\n
-    size_t prefixLen = static_cast<size_t>(endTag - buf);
-    size_t blockLen = std::strlen(kAorXmlBlock);
-    size_t suffixLen = std::strlen(endTag);  // "</root>" + any trailing whitespace
-
-    auto* newBuf = new(std::nothrow) char[prefixLen + blockLen + suffixLen + 1];
-    if (!newBuf) {
-        delete[] buf;
-        return;
-    }
-
-    std::memcpy(newBuf, buf, prefixLen);
-    std::memcpy(newBuf + prefixLen, kAorXmlBlock, blockLen);
-    std::memcpy(newBuf + prefixLen + blockLen, endTag, suffixLen);
-    size_t totalLen = prefixLen + blockLen + suffixLen;
-    newBuf[totalLen] = '\0';
-
-    delete[] buf;
-
-    // Write back.
-    hFile = CreateFileA(xmlPath, GENERIC_WRITE, 0,
-                        nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (hFile == INVALID_HANDLE_VALUE) {
-        Log("[settings] failed to open Root.xml for writing: %lu", GetLastError());
-        delete[] newBuf;
-        return;
-    }
-
-    DWORD written = 0;
-    WriteFile(hFile, newBuf, static_cast<DWORD>(totalLen), &written, nullptr);
-    CloseHandle(hFile);
-    delete[] newBuf;
-
-    Log("[settings] injected AOReloaded tab into Root.xml (%u bytes written)", written);
+done_appdata:;
 }
 
 void SettingsInit() {
     ResolveIniPath();
 
-    // Load persisted values from .ini (or use defaults).
+    // Load persisted values from .ini (or use defaults), then write back
+    // so the .ini always contains the full set of settings. This ensures
+    // new settings added in updates appear in the file immediately with
+    // their defaults, and the .ini is self-documenting for hand-editing.
     for (int i = 0; i < kSettingCount; ++i) {
         g_settings[i].current = ReadIniInt(
             g_settings[i].name, g_settings[i].default_val);
+        WriteIniInt(g_settings[i].name, g_settings[i].current);
         Log("[settings] loaded %s = %d (default %d)",
             g_settings[i].name, g_settings[i].current, g_settings[i].default_val);
     }

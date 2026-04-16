@@ -23,6 +23,11 @@ Forward movement from mouse buttons and the keyboard move-forward key (W / Up / 
 - "WoW-style camera (auto-recenter after LMB drag)" — master toggle for the camera system (yaw follow, RMB-align). Lerp speed controlled by the speed slider (default 2; higher = snappier follow).
 - "LMB+RMB mouse-run" — separately toggleable. When off, pressing both mouse buttons does nothing extra (stock behavior). When on, holding both buttons runs forward with mouse steering. Enabled by default.
 
+### Numpad Keys in Chat
+By default, pressing numpad keys while typing in chat triggers camera or movement actions instead of inserting text. With this fix enabled, numpad digits (0-9), decimal point, and arithmetic operators (+, -, *, /) all type normally in any text field — chat, search boxes, and other text inputs. The fix only activates when a text input has focus; numpad keys work as normal action bindings in gameplay.
+
+**Config:** Options panel (F10) → **AOReloaded** tab → **Input** → "Numpad keys type in chat". Enabled by default.
+
 <!-- 
 Template for adding features:
 
