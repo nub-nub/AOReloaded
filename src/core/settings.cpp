@@ -315,7 +315,7 @@ static const char kAorXmlBlock[] =
     "        <OptionSlider label=\"Camera recenter speed:\""
     " layout_borders=\"Rect(10,0,0,3)\" opt_type=\"variant\" opt_variable=\"AOR_CYawSpd\""
     " value_fmt=\"&lt;font color=#70C4D0&gt;%.0f&lt;/font&gt;\" value_scale=\"1\"/>\n"
-    "        <OptionCheckBox label=\"LMB+RMB mouse-run (hold both mouse buttons to run forward)\""
+    "        <OptionCheckBox label=\"LMB+RMB mouse-run (hold both mouse buttons to run forward - requires WoW camera enabled)\""
     " layout_borders=\"Rect(10,0,0,0)\" opt_type=\"variant\" opt_variable=\"AOR_MouseRun\"/>\n"
     "\n"
     "        <TextView value=\"Debug\" layout_borders=\"Rect(0,10,0,3)\" />\n"
