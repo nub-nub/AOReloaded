@@ -88,6 +88,11 @@ using FnN3MsgMovementChanged =
     void(__thiscall*)(void* engineAnarchy, int action,
                       float f1, float f2, bool b);
 
+// Resolved address of the original function (before hooking).
+static void* N3Msg_MovementChanged_Addr = nullptr;
+
+// Trampoline to the ORIGINAL N3Msg_MovementChanged. Bypasses our filter.
+// CalcSteering uses this for its own StartForward/StopForward dispatches.
 static FnN3MsgMovementChanged  N3Msg_MovementChanged   = nullptr;
 
 static bool Init() {
@@ -105,6 +110,8 @@ static bool Init() {
         Log("[camera] FAILED to resolve N3Msg_MovementChanged");
         return false;
     }
+    N3Msg_MovementChanged_Addr = p;
+    // Initially set to the raw address; replaced by trampoline after hooking.
     N3Msg_MovementChanged = reinterpret_cast<FnN3MsgMovementChanged>(p);
     Log("[camera] resolved N3Msg_MovementChanged -> %p", p);
     return true;
@@ -241,6 +248,26 @@ struct InputState {
 };
 
 static InputState g_input;
+
+// ── N3Msg_MovementChanged filter ────────────────────────────────────────
+//
+// Hooks the central movement dispatcher in Gamecode.dll. While BOTH_HELD
+// is active, suppresses StartForward/StopForward from ANY source (keyboard,
+// game systems). This prevents the keyboard's StopForward on W-release
+// from briefly interrupting mouse-button-driven forward movement.
+//
+// Our own CalcSteering code calls through the trampoline (original) to
+// bypass this filter when it needs to actually start/stop movement.
+
+static void __fastcall MovementChangedDetour(
+        void* engine, void* /*edx*/, int action, float f1, float f2, bool sync) {
+    if (g_input.state == MouseState::BOTH_HELD &&
+        (action == kActionStartForward || action == kActionStopForward)) {
+        return;  // suppress — CalcSteering is the sole authority on forward
+    }
+    // All other actions (strafe, turn, reverse, jump, etc.) pass through.
+    GamecodeAPI::N3Msg_MovementChanged(engine, action, f1, f2, sync);
+}
 
 // Check if a forward-movement key is physically held. Covers common
 // bindings (W, Up arrow, Numpad 8). Not perfect for exotic rebinds,
@@ -424,16 +451,9 @@ static int __fastcall CalcSteeringDetour(void* vehicle, void* /*edx*/, void* res
                 GamecodeAPI::N3Msg_MovementChanged(engine,
                     kActionStopForward, 0.0f, 0.0f, true);
             g_wasMovingForward = false;
-        } else if (shouldForward && g_wasMovingForward
-                   && g_input.state == MouseState::BOTH_HELD) {
-            // Self-healing: while BOTH_HELD is active, re-assert forward
-            // with sync=false (local only, no network packet). This
-            // overrides any external StopForward the keyboard may have
-            // sent (e.g., user released W while both buttons are held).
-            if (GamecodeAPI::N3Msg_MovementChanged)
-                GamecodeAPI::N3Msg_MovementChanged(engine,
-                    kActionStartForward, 0.0f, 0.0f, false);
         }
+        // No self-healing needed: the MovementChanged hook suppresses
+        // keyboard StopForward while BOTH_HELD is active.
     }
 
     // ── Yaw follow during movement ──────────────────────────────────
@@ -775,6 +795,29 @@ bool InitCameraHooks() {
     if (!GUIAPI::Init()) {
         Log("[camera] GUI API init failed — input handler hooks disabled");
         return false;
+    }
+
+    // ── Hook 0: N3Msg_MovementChanged (Gamecode.dll) ─────────────────
+    // Filters StartForward/StopForward while BOTH_HELD is active.
+    // Non-critical: if the prologue isn't hookable, forward movement
+    // still works but releasing W during BOTH_HELD causes a brief stutter.
+    if (GamecodeAPI::N3Msg_MovementChanged_Addr) {
+        auto* bytes = static_cast<uint8_t*>(GamecodeAPI::N3Msg_MovementChanged_Addr);
+        Log("[camera] MovementChanged at %p, prologue: %02X %02X %02X %02X %02X",
+            GamecodeAPI::N3Msg_MovementChanged_Addr,
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4]);
+
+        void* tramp = nullptr;
+        if (InstallHook(GamecodeAPI::N3Msg_MovementChanged_Addr,
+                        reinterpret_cast<void*>(&MovementChangedDetour),
+                        &tramp)) {
+            GamecodeAPI::N3Msg_MovementChanged =
+                reinterpret_cast<GamecodeAPI::FnN3MsgMovementChanged>(tramp);
+            Log("[camera] MovementChanged hook installed — forward filter active");
+        } else {
+            Log("[camera] MovementChanged hook failed (prologue not supported) "
+                "— forward filter disabled, minor edge case may occur");
+        }
     }
 
     // ── Hook 1: CalcSteering (N3.dll) ───────────────────────────────
