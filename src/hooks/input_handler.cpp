@@ -161,11 +161,13 @@ bool IsMouseRunEnabled() {
     return true;
 }
 
-static bool IsForwardKeyHeld() {
-    return (GetAsyncKeyState('W') & 0x8000) != 0 ||
-           (GetAsyncKeyState(VK_UP) & 0x8000) != 0 ||
-           (GetAsyncKeyState(VK_NUMPAD8) & 0x8000) != 0;
-}
+// Tracks whether the keyboard's own input pipeline has requested forward
+// movement. Updated by MovementChangedDetour when it sees StartForward/
+// StopForward pass through. Because the game's keyboard handler already
+// filters out text-input mode (chat, search boxes, etc.), this flag is
+// never set by typing — unlike GetAsyncKeyState which reads raw physical
+// key state regardless of UI focus.
+static bool g_keyboardForward = false;
 
 static AOString MakeString(const char* str) {
     AOString s;
@@ -228,7 +230,7 @@ static bool g_wasMovingForward = false;
 void UpdateForwardMovement(void* engine) {
     bool mouseForward = (g_input.state == MouseState::BOTH_HELD) &&
                          IsMouseRunEnabled();
-    bool shouldForward = mouseForward || IsForwardKeyHeld();
+    bool shouldForward = mouseForward || g_keyboardForward;
 
     if (shouldForward && !g_wasMovingForward) {
         if (GamecodeAPI::N3Msg_MovementChanged)
@@ -247,9 +249,17 @@ void UpdateForwardMovement(void* engine) {
 
 static void __fastcall MovementChangedDetour(
         void* engine, void* /*edx*/, int action, float f1, float f2, bool sync) {
-    if (g_input.state == MouseState::BOTH_HELD && IsMouseRunEnabled() &&
-        (action == kActionStartForward || action == kActionStopForward)) {
-        return;
+    // Track keyboard forward intent from the game's own input pipeline.
+    // The game only dispatches StartForward/StopForward when in action mode
+    // (not when typing in chat), so this is inherently text-input-safe.
+    if (action == kActionStartForward) {
+        g_keyboardForward = true;
+        if (g_input.state == MouseState::BOTH_HELD && IsMouseRunEnabled())
+            return;  // suppress dispatch, but intent is tracked above
+    } else if (action == kActionStopForward) {
+        g_keyboardForward = false;
+        if (g_input.state == MouseState::BOTH_HELD && IsMouseRunEnabled())
+            return;  // suppress dispatch, but intent is tracked above
     }
     GamecodeAPI::N3Msg_MovementChanged(engine, action, f1, f2, sync);
 }
