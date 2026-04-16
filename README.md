@@ -29,6 +29,26 @@ All features are configurable from an **AOReloaded** tab in the in-game options 
 
 Note that LMB+RMB mouse-run requires the WoW-style camera option enabled.
 
+## Planned Features
+
+Non-exhaustive list, in no particular order:
+
+- Chat font size slider
+- Finer-grained mouse sensitivity sliders
+- Chat timestamps
+- Inventory and nanoprograms search and filtering
+- Auto-loot
+- Cast bar with nano name
+- Killcounter/session stats (XP/hr, etc)
+- Network latency display
+- Realtime clock on UI / Session playtime timer
+- Bag space counter
+- Inventory sorting
+- Crash hardening
+- Map waypoints + breadcrumb trail
+- Vendor sell value display
+- Large cursor option
+- and more
 
 ## Building
 
