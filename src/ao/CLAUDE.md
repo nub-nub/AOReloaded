@@ -66,6 +66,7 @@ The global registry is an `std::map<String, ValueEntry>` backed by a red-black t
 - Instance methods: `__thiscall` (this in ECX)
 - All implementations in Utils.dll, imported by GUI.dll and Gamecode.dll
 - For inline-hook detours over `__thiscall`, declare the detour as `__fastcall(void* this_ecx, void* edx_unused, ...stack_args)`. ECX is preserved as `this`, EDX is the unused fastcall slot, and remaining stack args follow. Type the trampoline back as the original `__thiscall` so the trampoline's `RET N` cleanup matches the caller's expectations.
+- **Long DValue names** (> 15 chars, e.g. `MouseTurnSensitivity`): `AOString::FromShort` only handles SSO (≤ 15 chars). For longer names, use `MakeString()` in `camera_hook.cpp` which constructs a heap-mode `AOString` pointing to a static const — safe because `GetDValue` takes `const AOString&` (read-only).
 
 ## N3.dll — Camera System (RE 2026-04-14)
 

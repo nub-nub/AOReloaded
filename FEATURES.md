@@ -15,7 +15,9 @@ In 3rd person, the camera smoothly returns to a position behind your character w
 
 Additionally, any **right-click drag** realigns your character to face the direction the camera is currently looking and snaps the camera to directly behind — so after orbiting with LMB, your next RMB-drag starts from a clean "behind" view instead of preserving the orbit offset.
 
-**Both mouse buttons held** makes your character run forward (WoW-style "mouse-walk"). You can press the buttons in either order; the moment both are held, forward motion starts. Releasing either button stops forward motion and falls back to whatever the remaining button does (LMB → orbit, RMB → drag-turn, neither → idle). RMB drag behavior while both are held continues to rotate the character normally.
+**Both mouse buttons held** makes your character run forward (WoW-style "mouse-walk"). You can press the buttons in either order; the moment both are held, forward motion starts. Releasing either button falls back to whatever the remaining button does (LMB → orbit, RMB → drag-turn, neither → idle). RMB drag behavior while both are held continues to rotate the character normally.
+
+Forward movement from mouse buttons and the keyboard move-forward key (W / Up / Numpad 8) coexist cleanly: if you hold both mouse buttons and also press your forward key, releasing either input source does not interrupt the other. You can seamlessly transition between keyboard-driven and mouse-driven forward movement. Strafe and turn keys also work naturally while both mouse buttons are held.
 
 **Config:** Options panel (F10) → **AOReloaded** tab → **Camera** → "WoW-style camera (auto-recenter after LMB drag)". Lerp speed is controlled by the `AOR_CYawSpd` DValue (default 5; higher = snappier follow).
 
