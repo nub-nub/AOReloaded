@@ -501,7 +501,9 @@ static int __fastcall CalcSteeringDetour(void* vehicle, void* /*edx*/, void* res
         float followSpeed = kDefaultFollowSpeed;
         AOVariant speedVal{};
         if (GameAPI::GetVariant("AOR_CYawSpd", speedVal)) {
-            if (speedVal.type == static_cast<uint32_t>(VariantType::Float))
+            if (speedVal.type == static_cast<uint32_t>(VariantType::Double))
+                followSpeed = static_cast<float>(speedVal.as_double);
+            else if (speedVal.type == static_cast<uint32_t>(VariantType::Float))
                 followSpeed = speedVal.as_float;
             else if (speedVal.type == static_cast<uint32_t>(VariantType::Int))
                 followSpeed = static_cast<float>(speedVal.as_int);

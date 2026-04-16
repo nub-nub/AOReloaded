@@ -14,8 +14,8 @@
 // DllMain.
 
 #include "core/logging.h"
+#include "core/settings.h"
 #include "ao/game_api.h"
-#include "ao/dvalue_dump.h"
 #include "hooks/camera_hook.h"
 
 #include <windows.h>
@@ -58,15 +58,12 @@ DWORD WINAPI DeferredInit(LPVOID /*param*/) {
         aor::Log("[init] game API init failed (partial resolve)");
     }
 
-    // Register our custom DValues early — before the game loads the
-    // options panel XML so the widgets can bind to them.
-    aor::GameAPI::RegisterBool("AOR_TestToggle", true);
-    aor::GameAPI::RegisterInt("AOR_TestSlider", 50);
-
-    // Camera system DValues.
+    // Register AOReloaded settings as DValues. The settings system loads
+    // persisted values from AOReloaded.ini first, then registers DValues
+    // with those values (or defaults if .ini doesn't exist yet).
     // Names must be ≤ 15 chars (AOString SSO limit).
-    aor::GameAPI::RegisterBool("AOR_CamOn", true);
-    aor::GameAPI::RegisterInt("AOR_CYawSpd", 2);
+    aor::SettingsInit();
+    aor::SettingsRegisterAll();
 
     // Wait for game world.
     aor::Log("[init] waiting for game world...");
@@ -77,6 +74,11 @@ DWORD WINAPI DeferredInit(LPVOID /*param*/) {
 
     if (aor::GameAPI::Exists("camera_mode")) {
         aor::Log("[init] game world detected!");
+
+        // Install the SetDValue hook for settings persistence. Done here
+        // (after game world init) to avoid intercepting the hundreds of
+        // SetDValue calls the game makes during its own startup.
+        aor::SettingsInstallHook();
 
         // Install camera hooks now that GUI.dll and N3.dll are loaded.
         if (!aor::InitCameraHooks()) {
