@@ -17,14 +17,14 @@ Additionally, any **right-click drag** realigns your character to face the direc
 
 **Both mouse buttons held** makes your character run forward (WoW-style "mouse-walk"). You can press the buttons in either order; the moment both are held, forward motion starts. Releasing either button falls back to whatever the remaining button does (LMB → orbit, RMB → drag-turn, neither → idle). RMB drag behavior while both are held continues to rotate the character normally.
 
-Forward movement from mouse buttons and the keyboard move-forward key (W / Up / Numpad 8) coexist cleanly: if you hold both mouse buttons and also press your forward key, releasing either input source does not interrupt the other. You can seamlessly transition between keyboard-driven and mouse-driven forward movement. Strafe and turn keys also work naturally while both mouse buttons are held.
+Forward movement from mouse buttons and the keyboard move-forward key (W / whatever else) coexist cleanly: if you hold both mouse buttons and also press your forward key, releasing either input source does not interrupt the other. You can seamlessly transition between keyboard-driven and mouse-driven forward movement. Strafe and turn keys also work naturally while both mouse buttons are held.
 
 **Config:** Options panel (F10) → **AOReloaded** tab → **Camera**:
 - "WoW-style camera (auto-recenter after LMB drag)" — master toggle for the camera system (yaw follow, RMB-align). Lerp speed controlled by the speed slider (default 2; higher = snappier follow).
-- "LMB+RMB mouse-run" — separately toggleable. When off, pressing both mouse buttons does nothing extra (stock behavior). When on, holding both buttons runs forward with mouse steering. Enabled by default.
+  - "LMB+RMB mouse-run" — separately toggleable. When off, pressing both mouse buttons does nothing extra (stock behavior). When on, holding both buttons runs forward with mouse steering. Enabled by default, requires WoW-style camera enabled to use.
 
-### Numpad Keys in Chat
-By default, pressing numpad keys while typing in chat triggers camera or movement actions instead of inserting text. With this fix enabled, numpad digits (0-9), decimal point, and arithmetic operators (+, -, *, /) all type normally in any text field — chat, search boxes, and other text inputs. The fix only activates when a text input has focus; numpad keys work as normal action bindings in gameplay.
+### Numpad Keys in Chat Fix
+When a text input (e.g. chat) has focus, prevents numpad keys from triggering camera/movement actions and instead will write text to text input. Only active when a text input has focus; numpad keys work as normal action bindings during regular gameplay.
 
 **Config:** Options panel (F10) → **AOReloaded** tab → **Input** → "Numpad keys type in chat". Enabled by default.
 

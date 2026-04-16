@@ -23,6 +23,10 @@ Replaces the stock mouse camera with modern MMO controls:
 - **RMB-drag align** — right-click drag snaps your character to face the camera direction.
 - **Mouse-run** — hold both mouse buttons to run forward with mouse steering. Keyboard forward (W) and mouse-run coexist cleanly.
 
+### Numpad Chat Fix
+
+When enabled, pressing numpad keys while chat is focused enters numbers rather than triggering camera/movement actions.
+
 ### Options Panel
 
 All features are configurable from an **AOReloaded** tab in the in-game options panel (F10).
