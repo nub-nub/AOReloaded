@@ -252,23 +252,38 @@ static bool IsEnabled() {
     return true;  // default enabled
 }
 
-// Read MouseTurnSensitivity DValue.
+// Construct an AOString for any length. For len < 16, uses SSO inline
+// buffer. For len >= 16, points heap_ptr to the provided (must-outlive)
+// C string. No destructor runs on our AOString, so no ownership issues.
+static AOString MakeString(const char* str) {
+    AOString s;
+    std::memset(&s, 0, sizeof(s));
+    uint32_t len = static_cast<uint32_t>(std::strlen(str));
+    if (len < 16) {
+        std::memcpy(s.sso_buf, str, len + 1);
+        s.length = len;
+        s.capacity = 15;
+    } else {
+        s.heap_ptr = const_cast<char*>(str);
+        s.length = len;
+        s.capacity = len;
+    }
+    return s;
+}
+
+// Read MouseTurnSensitivity DValue. The name is 20 chars — exceeds the
+// 15-char SSO limit, so we construct a heap-mode AOString pointing to
+// a static const. GetDValue takes const& so this is read-safe.
 static float GetMouseSensitivity() {
-    AOVariant v{};
-    if (GameAPI::GetVariant("AOR_MSens", v)) {
-        if (v.type == static_cast<uint32_t>(VariantType::Float))
-            return v.as_float;
-        if (v.type == static_cast<uint32_t>(VariantType::Int))
-            return static_cast<float>(v.as_int);
-    }
-    // Fall back to stock DValue.
-    AOVariant sv{};
-    if (GameAPI::GetVariant("MouseTurnSens", sv)) {
-        if (sv.type == static_cast<uint32_t>(VariantType::Float))
-            return sv.as_float;
-        if (sv.type == static_cast<uint32_t>(VariantType::Int))
-            return static_cast<float>(sv.as_int);
-    }
+    if (!GameAPI::GetDValue) return 1.0f;
+    static const char kName[] = "MouseTurnSensitivity";
+    AOString name = MakeString(kName);
+    AOVariant result{};
+    GameAPI::GetDValue(&result, name, false);
+    if (result.type == static_cast<uint32_t>(VariantType::Float))
+        return result.as_float;
+    if (result.type == static_cast<uint32_t>(VariantType::Int))
+        return static_cast<float>(result.as_int);
     return 1.0f;
 }
 
