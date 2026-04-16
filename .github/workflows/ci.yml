@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x86
+
+      - name: Install LLVM + Ninja
+        run: choco install llvm ninja -y
+
+      - name: Configure
+        run: cmake --preset release
+
+      - name: Build
+        run: cmake --build build/release

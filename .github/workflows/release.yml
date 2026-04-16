@@ -1,0 +1,35 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x86
+
+      - name: Install LLVM + Ninja
+        run: choco install llvm ninja -y
+
+      - name: Configure
+        run: cmake --preset release
+
+      - name: Build
+        run: cmake --build build/release
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/release/version.dll
+          generate_release_notes: true
