@@ -23,6 +23,11 @@ Forward movement from mouse buttons and the keyboard move-forward key (W / whate
 - "WoW-style camera (auto-recenter after LMB drag)" — master toggle for the camera system (yaw follow, RMB-align). Lerp speed controlled by the speed slider (default 2; higher = snappier follow).
   - "LMB+RMB mouse-run" — separately toggleable. When off, pressing both mouse buttons does nothing extra (stock behavior). When on, holding both buttons runs forward with mouse steering. Enabled by default, requires WoW-style camera enabled to use.
 
+### LargeAddressAware (4 GB Memory)
+On first launch, AOReloaded patches the `AnarchyOnline.exe` on disk to enable the LargeAddressAware flag, which allows the 32-bit client to use up to 4 GB of virtual memory instead of the default 2 GB. This eliminates crashes caused by memory fragmentation when loading large maps or playing for extended sessions. The patch is permanent and takes effect from the second launch onward.
+
+**Config:** None — always on, applied automatically. Start the the game once after installing this mod, close it (the login screen is fine even) and you're good to go.
+
 ### Numpad Keys in Chat Fix
 When a text input (e.g. chat) has focus, prevents numpad keys from triggering camera/movement actions and instead will write text to text input. Only active when a text input has focus; numpad keys work as normal action bindings during regular gameplay.
 

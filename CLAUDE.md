@@ -20,7 +20,8 @@ src/
 │   ├── version_proxy.cpp    # Lazy-loaded forwarders (16 exports)
 │   └── version_proxy.def    # Export table
 ├── core/
-│   └── logging.cpp          # Thread-safe file logging with flush + session header
+│   ├── logging.cpp          # Thread-safe file logging with flush + session header
+│   └── laa_patch.cpp        # LargeAddressAware PE header patching (rename-copy-patch)
 └── ao/                      # AO client interop (see src/ao/CLAUDE.md for deep details)
     ├── types.h              # Reconstructed struct layouts (AOString, AOVariant, AODistributedValue)
     ├── game_api.h/.cpp      # Runtime-resolved function pointers into Utils.dll
@@ -84,6 +85,7 @@ The game's options panel is pure data-driven XML at `client/cd_image/gui/Default
 - **GUI.dll API resolution**: N3Msg dispatch functions (`CameraMouseLookMovement`, `MouseMovement`, `EndCameraMouseLook`, `EndMouseLook`) resolved by reading cached function pointers from GUI.dll's data section at known RVAs. `WindowController_c` and `AFCM` functions resolved by direct RVA. See `GUIAPI` namespace.
 - **WndProc hook removed**: the old WndProc hook (AnarchyOnline.exe RVA 0x4a66) is no longer needed — all mouse button state management is handled at the callback level.
 - **Options panel SSO limit**: DValue names bound to `OptionCheckBox`/`OptionSlider` MUST be ≤ 15 chars. `AOString::FromShort` silently returns an empty string for longer names, which corrupts the registry and hangs the slider widget. Sliders also expect Int (not Float) DValues — Float-bound sliders render with no knob and hang on click.
+- **LargeAddressAware patching** (`src/core/laa_patch.cpp`): patches AnarchyOnline.exe on disk to set `IMAGE_FILE_LARGE_ADDRESS_AWARE` (0x0020) in COFF Characteristics. Uses rename-copy-patch to work around the OS file lock on the running exe: renames exe to `.bak`, copies `.bak` to a new file at the original path (unlocked), writes the patched Characteristics WORD at the fixed PE offset (`e_lfanew + 22`). Runs during `DLL_PROCESS_ATTACH` (no game DLLs needed). One-time permanent patch; subsequent launches detect the flag is already set and skip. `.bak` cleaned up on next launch.
 - **Numpad text input fix** (`src/hooks/numpad_fix.cpp`): hooks `InputConfig_t::CheckInput` (GUI.dll RVA `0x1a4c1`, prologue `55 8B EC 51 53`). When text input mode is active (`this+0x67` or `this+0x27`), translates numpad keys (AO codes 0x42-0x50) to characters and injects via `WindowController_c::HandleTextInput`. Consumes the key event to prevent action bindings from firing. Respects AFCM redirect mode (hotkey assignment). Toggled by `AOR_NumpadFix` DValue.
 
 ## Caveats / footguns

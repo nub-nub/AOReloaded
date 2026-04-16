@@ -14,6 +14,7 @@
 // DllMain.
 
 #include "core/logging.h"
+#include "core/laa_patch.h"
 #include "core/settings.h"
 #include "ao/game_api.h"
 #include "hooks/input_handler.h"
@@ -123,6 +124,10 @@ void OnProcessAttach(HINSTANCE self) {
         aor::LogInit();
     }
     aor::Log("[init] AOReloaded v0.1.0 loading");
+
+    // Patch the exe on disk to enable LargeAddressAware if it isn't
+    // already set. Takes effect on the next launch. Only uses Win32 API.
+    aor::PatchLargeAddressAware();
 
     // Spawn the deferred init thread. We can't resolve game APIs here
     // because the game's DLLs aren't loaded yet during DLL_PROCESS_ATTACH.

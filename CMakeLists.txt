@@ -33,6 +33,7 @@ add_library(AOReloaded SHARED
     src/proxy/version_proxy.cpp
     src/proxy/version_proxy.def
     src/core/logging.cpp
+    src/core/laa_patch.cpp
     src/core/settings.cpp
     src/ao/game_api.cpp
     src/ao/dvalue_dump.cpp
