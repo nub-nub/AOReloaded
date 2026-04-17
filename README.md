@@ -45,7 +45,6 @@ Non-exhaustive list, in no particular order:
 - Chat font size slider
 - Finer-grained mouse sensitivity sliders
 - Chat timestamps
-- Chat numpad support
 - Inventory and nanoprograms search and filtering
 - Auto-loot
 - Cast bar with nano name
