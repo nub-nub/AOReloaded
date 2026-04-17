@@ -23,6 +23,12 @@ Replaces the stock mouse camera with modern MMO controls:
 - **RMB-drag align** — right-click drag snaps your character to face the camera direction.
 - **Mouse-run** — hold both mouse buttons to run forward with mouse steering. Keyboard forward (W) and mouse-run coexist cleanly.
 
+### Autorun+
+
+- Press autorun key once to start running, press it again to stop.
+- You can press autorun while holding down W (or even using the LMB+RMB thingy above) and it will keep running once you release the movement key.
+- Pressing move-forward, move-backward or both LMB+RMB buttons will cancel the autorun.
+
 ### LargeAddressAware (4 GB Memory)
 
 Automatically patches the executable to use up to 4 GB of virtual memory (instead of the default 2 GB), eliminating crashes from memory fragmentation on large maps. Applied once on first launch; takes effect from the second launch onward.
