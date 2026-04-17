@@ -136,6 +136,8 @@ static bool Init() {
 
 constexpr int kActionStartForward = 1;
 constexpr int kActionStopForward  = 2;
+constexpr int kActionStartReverse = 3;
+constexpr int kActionFullStop     = 22;
 
 // ── State ───────────────────────────────────────────────────────────────
 
@@ -161,13 +163,15 @@ bool IsMouseRunEnabled() {
     return true;
 }
 
-// Tracks whether the keyboard's own input pipeline has requested forward
-// movement. Updated by MovementChangedDetour when it sees StartForward/
-// StopForward pass through. Because the game's keyboard handler already
-// filters out text-input mode (chat, search boxes, etc.), this flag is
-// never set by typing — unlike GetAsyncKeyState which reads raw physical
-// key state regardless of UI focus.
-static bool g_keyboardForward = false;
+// ── Autorun state ───────────────────────────────────────────────────────
+//
+// Autorun is detected at its source by hooking SlotMovementForward in
+// GUI.dll and checking the return address to identify calls from
+// SlotMovementAutoRun. This gives us a definitive "the user pressed
+// the autorun key" signal, separate from the forward key.
+
+static bool g_autorunActive = false;              // autorun toggle state
+static bool g_autorunWasActiveBeforeBoth = false;  // for case 6 (pre-existing autorun)
 
 static AOString MakeString(const char* str) {
     AOString s;
@@ -223,44 +227,109 @@ const InputState& GetInputState() {
     return g_input;
 }
 
-// ── Forward movement evaluation ─────────────────────────────────────────
+// ── Forward movement helpers ────────────────────────────────────────────
 
-static bool g_wasMovingForward = false;
+// Send StartForward via trampoline (bypasses our filter).
+static void DispatchStartForward(void* engine) {
+    if (GamecodeAPI::N3Msg_MovementChanged)
+        GamecodeAPI::N3Msg_MovementChanged(engine,
+            kActionStartForward, 0.0f, 0.0f, true);
+}
 
-void UpdateForwardMovement(void* engine) {
-    bool mouseForward = (g_input.state == MouseState::BOTH_HELD) &&
-                         IsMouseRunEnabled();
-    bool shouldForward = mouseForward || g_keyboardForward;
+// Send StopForward via trampoline (bypasses our filter).
+static void DispatchStopForward(void* engine) {
+    if (GamecodeAPI::N3Msg_MovementChanged)
+        GamecodeAPI::N3Msg_MovementChanged(engine,
+            kActionStopForward, 0.0f, 0.0f, true);
+}
 
-    if (shouldForward && !g_wasMovingForward) {
-        if (GamecodeAPI::N3Msg_MovementChanged)
-            GamecodeAPI::N3Msg_MovementChanged(engine,
-                kActionStartForward, 0.0f, 0.0f, true);
-        g_wasMovingForward = true;
-    } else if (!shouldForward && g_wasMovingForward) {
-        if (GamecodeAPI::N3Msg_MovementChanged)
-            GamecodeAPI::N3Msg_MovementChanged(engine,
-                kActionStopForward, 0.0f, 0.0f, true);
-        g_wasMovingForward = false;
+// Engine instance accessor — resolved from N3.dll for movement dispatch.
+using FnGetEngineInstance = void*(__cdecl*)();
+static FnGetEngineInstance g_getEngineInstance = nullptr;
+
+static void* GetEngine() {
+    return g_getEngineInstance ? g_getEngineInstance() : nullptr;
+}
+
+// ── SlotMovementForward hook ────────────────────────────────────────────
+//
+// Hooks the forward key handler in GUI.dll. Both the forward key and the
+// autorun key call this function. We detect autorun by checking the return
+// address: if the caller is SlotMovementAutoRun, it's autorun.
+//
+// param_1: false = key down, true = key up.
+// Original computes action = param_1 + 1 (false→1=StartForward, true→2=StopForward).
+
+constexpr uint32_t kSlotMovementForwardRVA = 0x00027ec1;
+constexpr uint32_t kAutorunCallerRetRVA    = 0x00027fcd;  // return addr from SlotMovementAutoRun's CALL
+
+using FnSlotMovementForward = void(__thiscall*)(void* this_ecx, bool param_1);
+static FnSlotMovementForward g_origSlotForward = nullptr;
+
+static void __fastcall SlotMovementForwardDetour(
+        void* this_ecx, void* /*edx*/, bool param_1) {
+    bool isAutorun = (__builtin_return_address(0) ==
+                      reinterpret_cast<void*>(GUIAPI::g_guiBase + kAutorunCallerRetRVA));
+
+    if (isAutorun) {
+        // Autorun key pressed (key-down only — SlotMovementAutoRun
+        // ignores key-up, so we only ever see param_1=false here).
+        if (g_autorunActive) {
+            // Toggle OFF: send StopForward by calling original with true.
+            g_autorunActive = false;
+            g_origSlotForward(this_ecx, true);
+        } else {
+            // Toggle ON: send StartForward by calling original with false.
+            g_autorunActive = true;
+            g_origSlotForward(this_ecx, false);
+        }
+        return;
     }
+
+    // Normal forward key (W / up arrow / etc.)
+    if (!param_1 && g_autorunActive) {
+        // Forward key pressed while autorunning → cancel autorun.
+        // The key-down StartForward passes through (redundant, already moving).
+        // When the key is released, StopForward will pass through too
+        // (autorun is now off) and the character stops.
+        g_autorunActive = false;
+    }
+
+    g_origSlotForward(this_ecx, param_1);
 }
 
 // ── N3Msg_MovementChanged filter ────────────────────────────────────────
+//
+// Now much simpler: suppresses Start/StopForward during BOTH_HELD,
+// suppresses StopForward when autorun is active (so W release during
+// autorun doesn't cancel it), and cancels autorun on backward movement.
 
 static void __fastcall MovementChangedDetour(
         void* engine, void* /*edx*/, int action, float f1, float f2, bool sync) {
-    // Track keyboard forward intent from the game's own input pipeline.
-    // The game only dispatches StartForward/StopForward when in action mode
-    // (not when typing in chat), so this is inherently text-input-safe.
+
     if (action == kActionStartForward) {
-        g_keyboardForward = true;
         if (g_input.state == MouseState::BOTH_HELD && IsMouseRunEnabled())
-            return;  // suppress dispatch, but intent is tracked above
-    } else if (action == kActionStopForward) {
-        g_keyboardForward = false;
-        if (g_input.state == MouseState::BOTH_HELD && IsMouseRunEnabled())
-            return;  // suppress dispatch, but intent is tracked above
+            return;  // mouse owns forward, suppress
     }
+
+    if (action == kActionStopForward) {
+        if (g_input.state == MouseState::BOTH_HELD && IsMouseRunEnabled())
+            return;  // mouse owns forward, suppress
+        if (g_autorunActive)
+            return;  // autorun persists through W release
+    }
+
+    if (action == kActionStartReverse && g_autorunActive) {
+        // Backward cancels autorun. Stop forward first.
+        g_autorunActive = false;
+        GamecodeAPI::N3Msg_MovementChanged(engine,
+            kActionStopForward, 0.0f, 0.0f, true);
+    }
+
+    if (action == kActionFullStop) {
+        g_autorunActive = false;
+    }
+
     GamecodeAPI::N3Msg_MovementChanged(engine, action, f1, f2, sync);
 }
 
@@ -308,7 +377,9 @@ static void __fastcall OnMouseDownDetour(void* this_ecx, void* /*edx*/,
             if (mouseRunOn) {
                 if (g_input.state == MouseState::PENDING_RMB)
                     BeginDragVisuals();
+                g_autorunWasActiveBeforeBoth = g_autorunActive;
                 g_input.state = MouseState::BOTH_HELD;
+                if (void* eng = GetEngine()) DispatchStartForward(eng);
             }
             break;
         case MouseState::DRAGGING_LMB:
@@ -327,7 +398,9 @@ static void __fastcall OnMouseDownDetour(void* this_ecx, void* /*edx*/,
                     BeginDragVisuals();
                 if (g_input.state == MouseState::DRAGGING_LMB)
                     GUIAPI::EndCameraMouseLook();
+                g_autorunWasActiveBeforeBoth = g_autorunActive;
                 g_input.state = MouseState::BOTH_HELD;
+                if (void* eng = GetEngine()) DispatchStartForward(eng);
             }
             break;
         case MouseState::DRAGGING_RMB:
@@ -421,7 +494,22 @@ static void __fastcall EndDragDetour(void* this_ecx, void* /*edx*/) {
     bool rmb = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
 
     switch (g_input.state) {
-    case MouseState::BOTH_HELD:
+    case MouseState::BOTH_HELD: {
+        void* eng = GetEngine();
+        bool willResumeAutorun = g_autorunActive && !g_autorunWasActiveBeforeBoth;
+
+        if (willResumeAutorun) {
+            // Autorun was activated DURING BOTH_HELD (case 5).
+            // Seamless handoff — don't stop, let autorun take over.
+        } else {
+            // End mouse-driven forward movement.
+            if (eng) DispatchStopForward(eng);
+            if (g_autorunWasActiveBeforeBoth) {
+                // Was autorunning BEFORE BOTH_HELD (case 6). Cancel it.
+                g_autorunActive = false;
+            }
+        }
+
         if (rmb && !lmb) {
             g_input.state = MouseState::DRAGGING_RMB;
         } else if (lmb && !rmb) {
@@ -433,6 +521,7 @@ static void __fastcall EndDragDetour(void* this_ecx, void* /*edx*/) {
             g_input.state = MouseState::IDLE;
         }
         break;
+    }
 
     case MouseState::DRAGGING_LMB:
         if (!lmb) {
@@ -468,6 +557,14 @@ static void __fastcall EndDragDetour(void* this_ecx, void* /*edx*/) {
 // ── Init ────────────────────────────────────────────────────────────────
 
 bool InitInputHandler() {
+    // Resolve engine instance accessor from N3.dll (for movement dispatch).
+    HMODULE n3 = GetModuleHandleA("N3.dll");
+    if (n3) {
+        g_getEngineInstance = reinterpret_cast<FnGetEngineInstance>(
+            GetProcAddress(n3, "?GetInstance@n3EngineClient_t@@SAPAV1@XZ"));
+        Log("[input] GetEngineInstance -> %p", g_getEngineInstance);
+    }
+
     if (!GamecodeAPI::Init()) {
         Log("[input] Gamecode API init failed — mouse-run disabled");
     }
@@ -475,6 +572,22 @@ bool InitInputHandler() {
     if (!GUIAPI::Init()) {
         Log("[input] GUI API init failed — input handler disabled");
         return false;
+    }
+
+    // Hook SlotMovementForward (GUI.dll) — autorun detection.
+    {
+        void* addr = ResolveRVA("GUI.dll", kSlotMovementForwardRVA);
+        if (!addr) { Log("[input] SlotMovementForward RVA invalid"); return false; }
+        auto* bytes = static_cast<uint8_t*>(addr);
+        Log("[input] SlotMovementForward at %p, prologue: %02X %02X %02X %02X %02X",
+            addr, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4]);
+        void* tramp = nullptr;
+        if (!InstallHook(addr, reinterpret_cast<void*>(&SlotMovementForwardDetour), &tramp)) {
+            Log("[input] failed to hook SlotMovementForward — autorun disabled");
+        } else {
+            g_origSlotForward = reinterpret_cast<FnSlotMovementForward>(tramp);
+            Log("[input] SlotMovementForward hook installed — autorun active");
+        }
     }
 
     // Hook N3Msg_MovementChanged (non-critical).

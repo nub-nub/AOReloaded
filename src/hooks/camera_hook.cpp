@@ -153,9 +153,6 @@ static int __fastcall CalcSteeringDetour(void* vehicle, void* /*edx*/, void* res
         }
     }
 
-    // ── Unified forward-movement evaluation ─────────────────────────
-    UpdateForwardMovement(engine);
-
     // ── Yaw follow during movement ──────────────────────────────────
     {
         const auto& input = GetInputState();

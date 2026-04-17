@@ -10,8 +10,9 @@
 //   - LMB + RMB: run forward + steer (separately toggleable)
 //   - Seamless single-button transitions when releasing one of two
 //
-// Forward movement is a derived signal: shouldForward = BOTH_HELD || W.
-// Evaluated per-frame by UpdateForwardMovement() (called from camera hook).
+// Forward movement from BOTH_HELD is dispatched at state transitions
+// (enter/exit BOTH_HELD), not per-frame. Keyboard/autorun events are
+// suppressed during BOTH_HELD and replayed on exit if appropriate.
 
 #include <cstdint>
 
@@ -36,11 +37,6 @@ struct InputState {
 
 // Read-only access to the current input state.
 const InputState& GetInputState();
-
-// Per-frame forward movement evaluation. Call from the camera hook's
-// per-frame update (CalcSteering). Evaluates the unified forward signal
-// and dispatches StartForward/StopForward on edges.
-void UpdateForwardMovement(void* engine);
 
 // Check if our camera system is enabled (AOR_CamOn DValue).
 bool IsCameraEnabled();
