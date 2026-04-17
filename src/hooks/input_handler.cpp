@@ -137,7 +137,7 @@ static bool Init() {
 constexpr int kActionStartForward = 1;
 constexpr int kActionStopForward  = 2;
 constexpr int kActionStartReverse = 3;
-constexpr int kActionFullStop     = 22;
+// kActionFullStop (22) is a periodic heartbeat, not handled by us.
 
 // ── State ───────────────────────────────────────────────────────────────
 
@@ -172,6 +172,16 @@ bool IsMouseRunEnabled() {
 
 static bool g_autorunActive = false;              // autorun toggle state
 static bool g_autorunWasActiveBeforeBoth = false;  // for case 6 (pre-existing autorun)
+
+// Check if enhanced autorun (toggle + persist through W release) is enabled.
+static bool IsAutorunEnabled() {
+    AOVariant v{};
+    if (GameAPI::GetVariant("AOR_AutoRun", v) &&
+        v.type == static_cast<uint32_t>(VariantType::Bool)) {
+        return v.as_bool;
+    }
+    return true;
+}
 
 static AOString MakeString(const char* str) {
     AOString s;
@@ -268,6 +278,11 @@ static FnSlotMovementForward g_origSlotForward = nullptr;
 
 static void __fastcall SlotMovementForwardDetour(
         void* this_ecx, void* /*edx*/, bool param_1) {
+    if (!IsAutorunEnabled()) {
+        g_origSlotForward(this_ecx, param_1);
+        return;
+    }
+
     bool isAutorun = (__builtin_return_address(0) ==
                       reinterpret_cast<void*>(GUIAPI::g_guiBase + kAutorunCallerRetRVA));
 
@@ -326,9 +341,8 @@ static void __fastcall MovementChangedDetour(
             kActionStopForward, 0.0f, 0.0f, true);
     }
 
-    if (action == kActionFullStop) {
-        g_autorunActive = false;
-    }
+    // FullStop (action 22) is a periodic heartbeat from CheckMotionUpdate,
+    // NOT a user-initiated stop. Do not let it cancel autorun.
 
     GamecodeAPI::N3Msg_MovementChanged(engine, action, f1, f2, sync);
 }

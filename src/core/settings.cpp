@@ -45,6 +45,7 @@ static SettingDef g_settings[] = {
     { "AOR_CamOn",    SettingType::Bool, 1,       1,       0,   1  },
     { "AOR_CYawSpd",  SettingType::Int,  2,       2,       1,  10  },
     { "AOR_MouseRun", SettingType::Bool, 1,       1,       0,   1  },
+    { "AOR_AutoRun",  SettingType::Bool, 1,       1,       0,   1  },
     { "AOR_DebugLog", SettingType::Bool, 0,       0,       0,   1  },
     { "AOR_NumpadFix", SettingType::Bool, 1,       1,       0,   1  },
 };
@@ -318,6 +319,8 @@ static const char kAorXmlBlock[] =
     " value_fmt=\"&lt;font color=#70C4D0&gt;%.0f&lt;/font&gt;\" value_scale=\"1\"/>\n"
     "        <OptionCheckBox label=\"LMB+RMB mouse-run (hold both mouse buttons to run forward - requires WoW camera enabled)\""
     " layout_borders=\"Rect(10,0,0,0)\" opt_type=\"variant\" opt_variable=\"AOR_MouseRun\"/>\n"
+    "        <OptionCheckBox label=\"Toggle autorun &amp; work smoothly with forward-key\""
+    " layout_borders=\"Rect(10,0,0,0)\" opt_type=\"variant\" opt_variable=\"AOR_AutoRun\"/>\n"
     "\n"
     "        <TextView value=\"Input\" layout_borders=\"Rect(0,10,0,3)\" />\n"
     "        <OptionCheckBox label=\"Numpad keys type in chat fix\""
