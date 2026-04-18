@@ -20,6 +20,7 @@
 #include "hooks/input_handler.h"
 #include "hooks/camera_hook.h"
 #include "hooks/numpad_fix.h"
+#include "hooks/timer_bar_drag.h"
 
 #include <windows.h>
 
@@ -100,6 +101,11 @@ DWORD WINAPI DeferredInit(LPVOID /*param*/) {
         // Install numpad text input fix (GUI.dll CheckInput hook).
         if (!aor::InitNumpadFix()) {
             aor::Log("[init] numpad fix failed — numpad keys won't type in chat");
+        }
+
+        // Install timer bar drag (GUI.dll CreateTimer hook + mouse filter).
+        if (!aor::InitTimerBarDrag()) {
+            aor::Log("[init] timer bar drag failed — bars not draggable");
         }
     } else {
         aor::Log("[init] timed out waiting for game world");

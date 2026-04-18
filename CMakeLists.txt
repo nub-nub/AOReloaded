@@ -41,6 +41,7 @@ add_library(AOReloaded SHARED
     src/hooks/input_handler.cpp
     src/hooks/camera_hook.cpp
     src/hooks/numpad_fix.cpp
+    src/hooks/timer_bar_drag.cpp
 )
 
 set_target_properties(AOReloaded PROPERTIES

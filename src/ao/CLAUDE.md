@@ -233,6 +233,96 @@ Other notable ranges: F1-F24 = 0x27-0x3E, Letters A-Z = 0x52-0x6B, Digits 0-9 = 
 
 `WindowController_c::HandleTextInput(std::string const&)` — dispatches through signal at focused_view+0x88, then calls vtable+0x50. The `std::string` parameter has the same ABI layout as `AOString` (MSVC 2010).
 
+## GUI.dll — Timer System (TimerSystemModule_t)
+
+### TimerSystemModule_t (0x48 bytes) — singleton
+
+Manages the action timer bars (nano cast, item equip, reload, attack cooldown).
+
+| Field | Offset | Type | Notes |
+|-------|--------|------|-------|
+| vftable | +0x00 | ptr | SignalTarget_c base |
+| EventTimer_c | +0x08 | embedded | Frame timer |
+| timer_list | +0x28 | `std::list<TimerBarBase_c*>*` | Heap-allocated doubly-linked list |
+| slot_flags | +0x34 | `uint8_t[20]` | 1=free, 0=occupied. Max 20 bars |
+
+**Key RVAs:**
+
+| Function | RVA | Prologue | Notes |
+|----------|-----|----------|-------|
+| GetInstance (static, lazy) | 0x51d05 | B8 imm32 (SEH) | Static ptr at 0x1818ba |
+| CreateTimer | 0x518f0 | B8 imm32 (SEH) | `TimerBar_c* __thiscall(int, Identity_t const&, char const*, uint)` |
+| DeleteTimer | 0x517dd | — | Private, takes list iterator |
+| FindNextFreePos | 0x51779 | — | Scans slot_flags for first free slot |
+| GetTimer | 0x517a5 | — | Walks list matching Identity_t |
+| StartTimerBar | 0x51a27 | B8 imm32 (SEH) | Entry point from game events |
+| StopTimerbarMessage | 0x518b0 | — | Calls DeleteTimer for matching bars |
+
+### TimerBarBase_c (0x1C bytes) — base class for a single timer bar
+
+| Field | Offset | Type | Notes |
+|-------|--------|------|-------|
+| vftable | +0x00 | ptr | Virtual dtor at [1] |
+| render_window | +0x04 | `RenderWindow_t*` | Visual container sprite |
+| power_bar | +0x08 | `PowerBar_t*` | Progress bar widget |
+| text_line | +0x0C | `TextLine_t*` | Label text (null if unnamed) |
+| identity_type | +0x10 | int | Timer type (1-5) |
+| identity_inst | +0x14 | int | Timer instance |
+| slot_index | +0x18 | int | Position slot (0-19) |
+
+Constructor at RVA `0x512ae` (SEH prologue).
+
+**TimerBar_c** (0x28 bytes) — extends TimerBarBase_c with 3 zero-init int fields at +0x1C, +0x20, +0x24.
+
+### Position formula (hardcoded in TimerBarBase_c ctor)
+
+```
+Position: IPoint(0x28, (slot + 2) * 0x14)  →  (40px, (slot+2) * 20px)
+Size:     IPoint(0x80, 0x10)                →  (128px, 16px)
+```
+
+### Timer types (from StartTimerBar)
+
+| Type | String | Color | Purpose |
+|------|--------|-------|---------|
+| 1 | Timer_Attack | 0xaaffaa (green) | Attack cooldown |
+| 2 | Timer_Special | 0xaaffff (cyan) | Special ability |
+| 3 | Timer_Nano | 0xffaaaa (red) | Nano casting |
+| 4 | Timer_Item | 0xaaaaff (blue) | Item equip/unequip |
+| 5 | Timer_Reload | 0xffffff (white) | Weapon reload |
+
+### std::list node layout
+
+```
++0x00: void*  next
++0x04: void*  prev
++0x08: TimerBarBase_c*  data
+Sentinel = *(TimerSystemModule_t + 0x28)
+```
+
+### Sprite_t / RenderWindow_t positioning
+
+- `Sprite_t::Reposition(IPoint const&)` at RVA `0x212a1` — writes x,y at `this+0x20`/`this+0x24`
+- `RenderWindow_t::Resize(IPoint const&)` at RVA `0x20938` — writes w,h at `this+0x34`/`this+0x38`, manages internal sprite tile grid
+
+### PowerBar_t (0x74 bytes, inherits HotSpot_t)
+
+| Field | Offset | Type | Notes |
+|-------|--------|------|-------|
+| fill_sprite | +0x5c | `Sprite_t*` | Bar fill visual |
+| bg_sprite | +0x60 | `Sprite_t*` | Background (optional) |
+| original_width | +0x6c | int | From GFX texture |
+| original_height | +0x70 | int | From GFX texture |
+
+- GFX IDs for timer bars: `0x1a8` (background), `0x1a9` (fill)
+- `AdjustPowerLevel(float)` at RVA `0x205de` — sets fill percentage
+
+### TextLine_t (0x60 bytes, inherits SpriteList_t)
+
+- Constructor at RVA `0x223ff`: `TextLine_t(FontID_e, char const*, int layer, IPoint, TextOutputFlags_e, RenderWindow_t*)`
+- Text stored at `+0x18` as `std::string` (MSVC 2010 SSO layout)
+- `SetDefaultColor(int)` at RVA `0x223ef`
+
 ## Hook engine (`src/hooks/hook_engine.cpp`)
 
 Prologue whitelist includes `B8 xx xx xx xx` (`mov eax, imm32`) — the 5-byte MSVC SEH-prolog entry thunk used by functions with try/catch. The instruction is IP-independent and copies cleanly into the trampoline.

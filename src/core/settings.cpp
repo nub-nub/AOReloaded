@@ -48,6 +48,8 @@ static SettingDef g_settings[] = {
     { "AOR_AutoRun",  SettingType::Bool, 1,       1,       0,   1  },
     { "AOR_DebugLog", SettingType::Bool, 0,       0,       0,   1  },
     { "AOR_NumpadFix", SettingType::Bool, 1,       1,       0,   1  },
+    { "AOR_TBarX",     SettingType::Int,  0,       0,   -4000, 4000 },
+    { "AOR_TBarY",     SettingType::Int,  0,       0,   -4000, 4000 },
 };
 
 static constexpr int kSettingCount = sizeof(g_settings) / sizeof(g_settings[0]);

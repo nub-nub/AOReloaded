@@ -139,6 +139,39 @@ constexpr int kActionStopForward  = 2;
 constexpr int kActionStartReverse = 3;
 // kActionFullStop (22) is a periodic heartbeat, not handled by us.
 
+// ── Mouse event filters ─────────────────────────────────────────────────
+
+static constexpr int kMaxMouseFilters = 4;
+static MouseEventFilter g_mouseFilters[kMaxMouseFilters] = {};
+static int g_mouseFilterCount = 0;
+
+void RegisterMouseFilter(MouseEventFilter filter) {
+    if (g_mouseFilterCount < kMaxMouseFilters) {
+        g_mouseFilters[g_mouseFilterCount++] = filter;
+        Log("[input] mouse filter registered (%d total)", g_mouseFilterCount);
+    }
+}
+
+void UnregisterMouseFilter(MouseEventFilter filter) {
+    for (int i = 0; i < g_mouseFilterCount; ++i) {
+        if (g_mouseFilters[i] == filter) {
+            for (int j = i; j < g_mouseFilterCount - 1; ++j)
+                g_mouseFilters[j] = g_mouseFilters[j + 1];
+            g_mouseFilters[--g_mouseFilterCount] = nullptr;
+            return;
+        }
+    }
+}
+
+static bool RunMouseFilters(MouseEventType type, const float* pos_or_delta,
+                             int button, int flags) {
+    for (int i = 0; i < g_mouseFilterCount; ++i) {
+        if (g_mouseFilters[i] && g_mouseFilters[i](type, pos_or_delta, button, flags))
+            return true;
+    }
+    return false;
+}
+
 // ── State ───────────────────────────────────────────────────────────────
 
 static InputState g_input;
@@ -370,6 +403,9 @@ static FnEndDrag g_origEndDrag = nullptr;
 static void __fastcall OnMouseDownDetour(void* this_ecx, void* /*edx*/,
                                           const float* pos, int button,
                                           int clickFlags) {
+    if (RunMouseFilters(MouseEventType::Down, pos, button, clickFlags))
+        return;
+
     g_origOnMouseDown(this_ecx, pos, button, clickFlags);
 
     if (!IsCameraEnabled()) return;
@@ -431,6 +467,9 @@ static void __fastcall OnMouseDownDetour(void* this_ecx, void* /*edx*/,
 
 static void __fastcall OnMouseMoveDetour(void* this_ecx, void* /*edx*/,
                                           const float* delta) {
+    if (RunMouseFilters(MouseEventType::Move, delta, 0, 0))
+        return;
+
     if (!IsCameraEnabled()) {
         g_origOnMouseMove(this_ecx, delta);
         return;
@@ -474,6 +513,9 @@ static void __fastcall OnMouseMoveDetour(void* this_ecx, void* /*edx*/,
 
 static void __fastcall OnMouseUpDetour(void* this_ecx, void* /*edx*/,
                                         const float* pos, int button) {
+    if (RunMouseFilters(MouseEventType::Up, pos, button, 0))
+        return;
+
     if (!IsCameraEnabled()) {
         g_origOnMouseUp(this_ecx, pos, button);
         return;
@@ -499,6 +541,9 @@ static void __fastcall OnMouseUpDetour(void* this_ecx, void* /*edx*/,
 // ── EndDrag ─────────────────────────────────────────────────────────────
 
 static void __fastcall EndDragDetour(void* this_ecx, void* /*edx*/) {
+    if (RunMouseFilters(MouseEventType::EndDrag, nullptr, 0, 0))
+        return;
+
     if (!IsCameraEnabled()) {
         g_origEndDrag(this_ecx);
         return;

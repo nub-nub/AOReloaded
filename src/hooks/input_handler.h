@@ -49,4 +49,23 @@ bool IsMouseRunEnabled();
 // Returns true if critical hooks installed successfully.
 bool InitInputHandler();
 
+// ── Mouse event filter system ──────────────────────────────────────────
+//
+// Allows other modules to intercept mouse events before the camera
+// system processes them. Filters are called in registration order;
+// the first filter that returns true consumes the event and prevents
+// both the stock handler and our camera logic from seeing it.
+
+enum class MouseEventType : uint8_t { Down, Move, Up, EndDrag };
+
+// pos_or_delta: screen-space position (Down/Up) or pixel delta (Move).
+//               nullptr for EndDrag.
+// button: 1=LMB, 2=RMB (Down/Up only), 0 for Move/EndDrag.
+// flags:  clickFlags from Down, 0 otherwise.
+using MouseEventFilter = bool(*)(MouseEventType type, const float* pos_or_delta,
+                                  int button, int flags);
+
+void RegisterMouseFilter(MouseEventFilter filter);
+void UnregisterMouseFilter(MouseEventFilter filter);
+
 }  // namespace aor

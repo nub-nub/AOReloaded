@@ -33,6 +33,11 @@ When a text input (e.g. chat) has focus, prevents numpad keys from triggering ca
 
 **Config:** Options panel (F10) → **AOReloaded** tab → **Input** → "Numpad keys type in chat". Enabled by default.
 
+### Draggable Timer Bars
+The action timer bars (nano casting, item equip/unequip, reload, attack cooldown) can be repositioned by clicking and dragging any active bar. The entire group moves together. Position is saved automatically and persists across sessions.
+
+**Config:** None — always on. Drag any timer bar to reposition.
+
 <!-- 
 Template for adding features:
 
