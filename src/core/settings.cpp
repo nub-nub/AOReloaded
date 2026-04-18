@@ -48,11 +48,24 @@ static SettingDef g_settings[] = {
     { "AOR_AutoRun",  SettingType::Bool, 1,       1,       0,   1  },
     { "AOR_DebugLog", SettingType::Bool, 0,       0,       0,   1  },
     { "AOR_NumpadFix", SettingType::Bool, 1,       1,       0,   1  },
-    { "AOR_TBarX",     SettingType::Int,  0,       0,   -4000, 4000 },
-    { "AOR_TBarY",     SettingType::Int,  0,       0,   -4000, 4000 },
+    { "AOR_TBarX",     SettingType::Int,  40,      40,      0, 4096 },
+    { "AOR_TBarY",     SettingType::Int,  40,      40,      0, 4096 },
+    { "AOR_TBarW",     SettingType::Int, 128,     128,     32, 1024 },
+    { "AOR_TBarH",     SettingType::Int,  16,      16,      8,  128 },
 };
 
 static constexpr int kSettingCount = sizeof(g_settings) / sizeof(g_settings[0]);
+
+// ── Settings change callbacks ─────────────────────────────────────────
+
+static constexpr int kMaxSettingCallbacks = 4;
+static SettingChangedCallback g_settingCallbacks[kMaxSettingCallbacks] = {};
+static int g_settingCallbackCount = 0;
+
+void RegisterSettingCallback(SettingChangedCallback cb) {
+    if (g_settingCallbackCount < kMaxSettingCallbacks)
+        g_settingCallbacks[g_settingCallbackCount++] = cb;
+}
 static const char kIniSection[] = "AOReloaded";
 
 // ── DValue tree min/max ────────────────────────────────────────────────
@@ -265,6 +278,12 @@ static void __cdecl SetDValueDetour(const AOString& name, const AOVariant& value
         def->current = intVal;
         WriteIniInt(def->name, intVal);
         Log("[settings] persisted %s = %d", def->name, intVal);
+
+        // Notify registered listeners.
+        for (int i = 0; i < g_settingCallbackCount; ++i) {
+            if (g_settingCallbacks[i])
+                g_settingCallbacks[i](def->name, intVal);
+        }
     }
 }
 
@@ -323,6 +342,22 @@ static const char kAorXmlBlock[] =
     " layout_borders=\"Rect(10,0,0,0)\" opt_type=\"variant\" opt_variable=\"AOR_MouseRun\"/>\n"
     "        <OptionCheckBox label=\"Toggle autorun &amp; work smoothly with forward-key\""
     " layout_borders=\"Rect(10,0,0,0)\" opt_type=\"variant\" opt_variable=\"AOR_AutoRun\"/>\n"
+    "\n"
+    "        <TextView value=\"Timer Bars\" layout_borders=\"Rect(0,10,0,3)\" />\n"
+    "        <TextView value=\"Cast/action timer bar position. Drag any active bar in-game, or use these sliders. Default: 40, 40.\""
+    " layout_borders=\"Rect(10,0,0,3)\" />\n"
+    "        <OptionSlider label=\"X position:\""
+    " layout_borders=\"Rect(10,0,0,3)\" opt_type=\"variant\" opt_variable=\"AOR_TBarX\""
+    " value_fmt=\"&lt;font color=#70C4D0&gt;%.0f&lt;/font&gt;\" value_scale=\"1\"/>\n"
+    "        <OptionSlider label=\"Y position:\""
+    " layout_borders=\"Rect(10,0,0,3)\" opt_type=\"variant\" opt_variable=\"AOR_TBarY\""
+    " value_fmt=\"&lt;font color=#70C4D0&gt;%.0f&lt;/font&gt;\" value_scale=\"1\"/>\n"
+    "        <OptionSlider label=\"Width (default: 128):\""
+    " layout_borders=\"Rect(10,0,0,3)\" opt_type=\"variant\" opt_variable=\"AOR_TBarW\""
+    " value_fmt=\"&lt;font color=#70C4D0&gt;%.0f&lt;/font&gt;\" value_scale=\"1\"/>\n"
+    "        <OptionSlider label=\"Height (default: 16):\""
+    " layout_borders=\"Rect(10,0,0,3)\" opt_type=\"variant\" opt_variable=\"AOR_TBarH\""
+    " value_fmt=\"&lt;font color=#70C4D0&gt;%.0f&lt;/font&gt;\" value_scale=\"1\"/>\n"
     "\n"
     "        <TextView value=\"Input\" layout_borders=\"Rect(0,10,0,3)\" />\n"
     "        <OptionCheckBox label=\"Numpad keys type in chat fix\""

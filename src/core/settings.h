@@ -41,4 +41,14 @@ void PatchOptionsXml();
 // Returns false if the hook couldn't be installed.
 bool SettingsInstallHook();
 
+// ── Settings change callback ───────────────────────────────────────────
+// Notifies registered listeners when an AOReloaded setting is changed
+// (e.g. by an options panel slider).  Called after the new value is
+// persisted to .ini.
+
+using SettingChangedCallback = void(*)(const char* name, int newValue);
+
+// Register a callback.  Up to 4 callbacks supported.
+void RegisterSettingCallback(SettingChangedCallback cb);
+
 }  // namespace aor

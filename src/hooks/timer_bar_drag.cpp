@@ -7,7 +7,7 @@
 //   3. Persists the offset to AOReloaded.ini via the DValue system
 //
 // Future extension points:
-//   - ResizeAllBars(): call RenderWindow_t::Resize on each bar for
+//   - ScaleAllBars(): call RenderWindow_t::Resize on each bar for
 //     configurable dimensions (needs PowerBar_t resize too)
 //   - Text overlay: TimerBarBase_c+0x0C already holds a TextLine_t*;
 //     hook StartTimerBar to capture the actual nano name from the
@@ -19,6 +19,7 @@
 #include "ao/game_api.h"
 #include "ao/types.h"
 #include "core/logging.h"
+#include "core/settings.h"
 
 #include <windows.h>
 #include <cstdint>
@@ -28,18 +29,19 @@ namespace aor {
 
 // ── Constants ───────────────────────────────────────────────────────────
 
-// Stock position formula: X = 40, Y = (slot + 2) * 20.
+// Stock default position: X = 40, Y = 40.  Bars stack vertically at 20px spacing.
 static constexpr int kDefaultX        = 0x28;   // 40
-static constexpr int kDefaultSlotBase = 2;
+static constexpr int kDefaultBarW     = 0x80;   // 128
+static constexpr int kDefaultBarH     = 0x10;   // 16
 static constexpr int kSlotHeight      = 0x14;   // 20
-// Default bar size (128x16). Read from RenderWindow_t +0x34/+0x38 at runtime.
-// static constexpr int kDefaultBarW = 0x80;
-// static constexpr int kDefaultBarH = 0x10;
 
 // GUI.dll RVAs.
 static constexpr uint32_t kCreateTimerRVA       = 0x518f0;   // TimerBar_c path (logout, camp)
 static constexpr uint32_t kCreateGameTimerRVA   = 0x5195b;   // GameTimerBar_c path (equip, nano, attack, reload)
 static constexpr uint32_t kRWRepositionRVA      = 0x20f6e;   // RenderWindow_t::Reposition
+// RenderWindow_t::SetScale RVA resolved inline in init (0x20b0c).
+// RenderWindow_t::Resize at 0x20938 only re-tiles background, doesn't scale content.
+
 // TimerBarBase_c field offsets.
 static constexpr int kBarRenderWindow = 0x04;
 static constexpr int kBarSlotIndex    = 0x18;
@@ -48,7 +50,6 @@ static constexpr int kBarSlotIndex    = 0x18;
 //   kBarPowerBar  = 0x08  — PowerBar_t* for resizing
 //   kBarTextLine  = 0x0C  — TextLine_t* for nano name overlay
 //   kBarIdentType = 0x10  — timer type (1-5) for type-specific behavior
-//   kRWResizeRVA  = 0x20938 — RenderWindow_t::Resize for bar resizing
 
 // TimerSystemModule_t field offsets.
 static constexpr int kTSMTimerList    = 0x28;
@@ -61,6 +62,18 @@ static uintptr_t g_guiBase = 0;
 // then repositions internal RenderSprite_t grid and refreshes HotSpot children.
 using FnRWReposition = void(__thiscall*)(void* renderWindow, const int* ipoint);
 static FnRWReposition g_rwReposition = nullptr;
+
+// RenderWindow_t::SetScale(float const&, float const&) — stores scale at
+// +0x3c/+0x40, propagates to RenderSprite_t tiles.  Updates dest dimensions
+// but does NOT rebuild GPU quad vertices — must follow with Resize.
+using FnRWSetScale = void(__thiscall*)(void* renderWindow,
+                                        const float* scaleX, const float* scaleY);
+static FnRWSetScale g_rwSetScale = nullptr;
+
+// RenderWindow_t::Resize(IPoint const&) — re-tiles the grid AND rebuilds
+// RenderSprite_t quad vertices using current scale values.
+using FnRWResize = void(__thiscall*)(void* renderWindow, const int* ipoint);
+static FnRWResize g_rwResize = nullptr;
 
 // TimerSystemModule_t::GetInstance — lazy singleton accessor.
 using FnTSMGetInstance = void*(__cdecl*)();
@@ -91,19 +104,22 @@ static FnCreateGameTimer g_origCreateGameTimer = nullptr;
 
 // ── State ───────────────────────────────────────────────────────────────
 
-static int  g_offsetX = 0;           // pixel offset from default position
-static int  g_offsetY = 0;
+static int  g_posX = kDefaultX;      // absolute X position (AOR_TBarX)
+static int  g_posY = kDefaultX;      // absolute Y of first bar (AOR_TBarY); default 40
+static int  g_barW = kDefaultBarW;   // bar width (AOR_TBarW)
+static int  g_barH = kDefaultBarH;   // bar height (AOR_TBarH)
 static bool g_dragging = false;
 static float g_dragStartCursorX = 0;
 static float g_dragStartCursorY = 0;
-static int   g_dragStartOffsetX = 0;
-static int   g_dragStartOffsetY = 0;
+static int   g_dragStartPosX = 0;
+static int   g_dragStartPosY = 0;
 
 // Captured from the CreateTimer hook's ECX, or resolved via GetInstance.
 static void* g_timerSystemModule = nullptr;
 
-// Forward declaration — called from GetTSM on first resolution.
+// Forward declarations — called from GetTSM on first resolution.
 static void RepositionAllBars();
+static void ScaleAllBars();
 
 // Get the TimerSystemModule_t singleton. Tries cached pointer first,
 // then falls back to calling GetInstance().
@@ -114,11 +130,13 @@ static void* GetTSM() {
         if (g_timerSystemModule) {
             Log("[timerbar] resolved TSM singleton via GetInstance: %p",
                 g_timerSystemModule);
-            // Apply saved offset to any bars that already exist.
-            // RepositionAllBars() calls GetTSM() but won't recurse
-            // because g_timerSystemModule is now set.
-            if (g_offsetX != 0 || g_offsetY != 0)
+            // Apply saved position/size to any bars that already exist.
+            // These functions call GetTSM() but won't recurse because
+            // g_timerSystemModule is already set above.
+            if (g_posX != kDefaultX || g_posY != kDefaultX)
                 RepositionAllBars();
+            if (g_barW != kDefaultBarW || g_barH != kDefaultBarH)
+                ScaleAllBars();
         }
     }
     return g_timerSystemModule;
@@ -133,8 +151,8 @@ static void RepositionBar(void* barBase) {
         reinterpret_cast<uintptr_t>(barBase) + kBarSlotIndex);
 
     int pos[2];
-    pos[0] = kDefaultX + g_offsetX;
-    pos[1] = (slot + kDefaultSlotBase) * kSlotHeight + g_offsetY;
+    pos[0] = g_posX;
+    pos[1] = g_posY + slot * kSlotHeight;
 
     if (rw && g_rwReposition)
         g_rwReposition(rw, pos);
@@ -157,6 +175,52 @@ static void RepositionAllBars() {
         if (barBase)
             RepositionBar(barBase);
         node = reinterpret_cast<void**>(*node);  // next
+    }
+}
+
+// ── Resize helpers ──────────────────────────────────────────────────────
+
+// kBarPowerBar = 0x08  — PowerBar_t* (future: nano name overlay, text)
+
+static void ScaleBar(void* barBase) {
+    auto* rw = *reinterpret_cast<void**>(
+        reinterpret_cast<uintptr_t>(barBase) + kBarRenderWindow);
+    if (!rw || !g_rwSetScale || !g_rwResize) return;
+
+    float sx = static_cast<float>(g_barW) / static_cast<float>(kDefaultBarW);
+    float sy = static_cast<float>(g_barH) / static_cast<float>(kDefaultBarH);
+
+    // Step 1: Set scale factors on all tiles (updates dest dimensions but
+    //         does NOT rebuild GPU quad vertices).
+    g_rwSetScale(rw, &sx, &sy);
+
+    // Step 2: Trigger a Resize with the CURRENT stored size.  This calls
+    //         RenderSprite_t::Resize on each tile, which reads the scale
+    //         values we just set and rebuilds the GPU quad vertices.
+    int currentSize[2];
+    currentSize[0] = *reinterpret_cast<int*>(reinterpret_cast<uintptr_t>(rw) + 0x34);
+    currentSize[1] = *reinterpret_cast<int*>(reinterpret_cast<uintptr_t>(rw) + 0x38);
+    g_rwResize(rw, currentSize);
+
+    Log("[timerbar] ScaleBar: scale=(%.2f,%.2f) rwSize=(%d,%d)", sx, sy,
+        currentSize[0], currentSize[1]);
+}
+
+// Walk the game's timer bar list and resize every bar.
+static void ScaleAllBars() {
+    void* tsm = GetTSM();
+    if (!tsm) return;
+
+    auto** sentinel = *reinterpret_cast<void***>(
+        reinterpret_cast<uintptr_t>(tsm) + kTSMTimerList);
+    if (!sentinel) return;
+
+    auto** node = reinterpret_cast<void**>(*sentinel);
+    while (node != sentinel) {
+        void* barBase = node[2];
+        if (barBase)
+            ScaleBar(barBase);
+        node = reinterpret_cast<void**>(*node);
     }
 }
 
@@ -243,30 +307,38 @@ static bool HitTestTimerBars(float px, float py, BarHitInfo* outHit) {
 
 // ── Persistence ─────────────────────────────────────────────────────────
 
-static void LoadOffset() {
+static void LoadPosition() {
     AOVariant v{};
     if (GameAPI::GetVariant("AOR_TBarX", v) &&
         v.type == static_cast<uint32_t>(VariantType::Int)) {
-        g_offsetX = v.as_int;
+        g_posX = v.as_int;
     }
     if (GameAPI::GetVariant("AOR_TBarY", v) &&
         v.type == static_cast<uint32_t>(VariantType::Int)) {
-        g_offsetY = v.as_int;
+        g_posY = v.as_int;
     }
-    Log("[timerbar] loaded offset: X=%d Y=%d", g_offsetX, g_offsetY);
+    if (GameAPI::GetVariant("AOR_TBarW", v) &&
+        v.type == static_cast<uint32_t>(VariantType::Int)) {
+        g_barW = v.as_int;
+    }
+    if (GameAPI::GetVariant("AOR_TBarH", v) &&
+        v.type == static_cast<uint32_t>(VariantType::Int)) {
+        g_barH = v.as_int;
+    }
+    Log("[timerbar] loaded pos=(%d,%d) size=(%d,%d)", g_posX, g_posY, g_barW, g_barH);
 }
 
-static void SaveOffset() {
+static void SavePosition() {
     if (!GameAPI::SetDValue) return;
 
     AOString nameX = AOString::FromShort("AOR_TBarX");
     AOString nameY = AOString::FromShort("AOR_TBarY");
-    AOVariant valX = AOVariant::FromInt(g_offsetX);
-    AOVariant valY = AOVariant::FromInt(g_offsetY);
+    AOVariant valX = AOVariant::FromInt(g_posX);
+    AOVariant valY = AOVariant::FromInt(g_posY);
 
     GameAPI::SetDValue(nameX, valX);
     GameAPI::SetDValue(nameY, valY);
-    Log("[timerbar] saved offset: X=%d Y=%d", g_offsetX, g_offsetY);
+    Log("[timerbar] saved position: X=%d Y=%d", g_posX, g_posY);
 }
 
 // ── CreateTimer hook ────────────────────────────────────────────────────
@@ -290,12 +362,12 @@ static void* __fastcall CreateTimerDetour(void* ecx_this, void* /*edx*/,
             reinterpret_cast<uintptr_t>(rw) + 0x2c) : -1;
         int spriteY = rw ? *reinterpret_cast<int*>(
             reinterpret_cast<uintptr_t>(rw) + 0x30) : -1;
-        Log("[timerbar] CreateTimer: bar=%p slot=%d rw=%p sprite_pos=(%d,%d) name=%s",
+        Log("[timerbar] CreateTimer: bar=%p slot=%d rw=%p pos=(%d,%d) name=%s",
             bar, slot, rw, spriteX, spriteY, name ? name : "(null)");
 
-        if (g_offsetX != 0 || g_offsetY != 0) {
-            RepositionBar(bar);
-        }
+        RepositionBar(bar);
+        if (g_barW != kDefaultBarW || g_barH != kDefaultBarH)
+            ScaleBar(bar);
     }
 
     return bar;
@@ -325,9 +397,9 @@ static void* __fastcall CreateGameTimerDetour(void* ecx_this, void* /*edx*/,
         Log("[timerbar] CreateGameTimer: bar=%p slot=%d rw=%p pos=(%d,%d) name=%s",
             bar, slot, rw, spriteX, spriteY, name ? name : "(null)");
 
-        if (g_offsetX != 0 || g_offsetY != 0) {
-            RepositionBar(bar);
-        }
+        RepositionBar(bar);
+        if (g_barW != kDefaultBarW || g_barH != kDefaultBarH)
+            ScaleBar(bar);
     }
 
     return bar;
@@ -356,22 +428,20 @@ static bool TimerBarMouseFilter(MouseEventType type, const float* pos_or_delta,
         if (!HitTestTimerBars(cx, cy, &hit))
             return false;
 
-        // Derive the ACTUAL offset from where the bar really is on screen,
-        // not from the saved offset.  Bars created through unhooked paths
-        // appear at the default position — using the stale saved offset
-        // would cause the bar to jump on first drag move.
-        int defaultY = (hit.slot + kDefaultSlotBase) * kSlotHeight;
-        g_offsetX = hit.actualX - kDefaultX;
-        g_offsetY = hit.actualY - defaultY;
+        // Derive the actual position from where the bar really is, not from
+        // the saved DValue.  Bars may have been created at the default
+        // position through a path that ran before our hook was ready.
+        g_posX = hit.actualX;
+        g_posY = hit.actualY - hit.slot * kSlotHeight;
 
         // Start drag.
         g_dragging = true;
         g_dragStartCursorX = cx;
         g_dragStartCursorY = cy;
-        g_dragStartOffsetX = g_offsetX;
-        g_dragStartOffsetY = g_offsetY;
-        Log("[timerbar] drag started at (%.0f, %.0f) derived offset=(%d,%d)",
-            cx, cy, g_offsetX, g_offsetY);
+        g_dragStartPosX = g_posX;
+        g_dragStartPosY = g_posY;
+        Log("[timerbar] drag started at (%.0f, %.0f) pos=(%d,%d)",
+            cx, cy, g_posX, g_posY);
         return true;
     }
 
@@ -382,8 +452,8 @@ static bool TimerBarMouseFilter(MouseEventType type, const float* pos_or_delta,
         float cx, cy;
         if (!GetCursorPos(cx, cy)) return false;
 
-        g_offsetX = g_dragStartOffsetX + static_cast<int>(cx - g_dragStartCursorX);
-        g_offsetY = g_dragStartOffsetY + static_cast<int>(cy - g_dragStartCursorY);
+        g_posX = g_dragStartPosX + static_cast<int>(cx - g_dragStartCursorX);
+        g_posY = g_dragStartPosY + static_cast<int>(cy - g_dragStartCursorY);
 
         RepositionAllBars();
         return true;
@@ -395,8 +465,8 @@ static bool TimerBarMouseFilter(MouseEventType type, const float* pos_or_delta,
         if (button != 1) return false;
 
         g_dragging = false;
-        SaveOffset();
-        Log("[timerbar] drag ended, offset: X=%d Y=%d", g_offsetX, g_offsetY);
+        SavePosition();
+        Log("[timerbar] drag ended, pos: X=%d Y=%d", g_posX, g_posY);
         return true;
     }
 
@@ -404,14 +474,32 @@ static bool TimerBarMouseFilter(MouseEventType type, const float* pos_or_delta,
         if (!g_dragging) return false;
 
         g_dragging = false;
-        SaveOffset();
-        Log("[timerbar] drag ended (EndDrag), offset: X=%d Y=%d",
-            g_offsetX, g_offsetY);
+        SavePosition();
+        Log("[timerbar] drag ended (EndDrag), pos: X=%d Y=%d",
+            g_posX, g_posY);
         return true;
     }
     }
 
     return false;
+}
+
+// ── Settings callback — live slider updates ─────────────────────────────
+
+static void OnSettingChanged(const char* name, int newValue) {
+    if (std::strcmp(name, "AOR_TBarX") == 0) {
+        g_posX = newValue;
+        RepositionAllBars();
+    } else if (std::strcmp(name, "AOR_TBarY") == 0) {
+        g_posY = newValue;
+        RepositionAllBars();
+    } else if (std::strcmp(name, "AOR_TBarW") == 0) {
+        g_barW = newValue;
+        ScaleAllBars();
+    } else if (std::strcmp(name, "AOR_TBarH") == 0) {
+        g_barH = newValue;
+        ScaleAllBars();
+    }
 }
 
 // ── Init ────────────────────────────────────────────────────────────────
@@ -427,13 +515,20 @@ bool InitTimerBarDrag() {
     // Resolve function pointers.
     g_rwReposition = reinterpret_cast<FnRWReposition>(
         g_guiBase + kRWRepositionRVA);
+    g_rwSetScale = reinterpret_cast<FnRWSetScale>(
+        g_guiBase + 0x20b0c);  // RenderWindow_t::SetScale
+    g_rwResize = reinterpret_cast<FnRWResize>(
+        g_guiBase + 0x20938);  // RenderWindow_t::Resize
     g_tsmGetInstance = reinterpret_cast<FnTSMGetInstance>(
         g_guiBase + 0x51d05);  // TimerSystemModule_t::GetInstance
     g_wcGetInstance = reinterpret_cast<FnWCGetInstance>(
         g_guiBase + 0xb454);  // WindowController_c::GetInstance
 
-    // Load saved offset from DValues.
-    LoadOffset();
+    // Load saved position from DValues.
+    LoadPosition();
+
+    // Register for live slider updates from the options panel.
+    RegisterSettingCallback(&OnSettingChanged);
 
     // Hook CreateTimer.
     void* target = reinterpret_cast<void*>(g_guiBase + kCreateTimerRVA);
