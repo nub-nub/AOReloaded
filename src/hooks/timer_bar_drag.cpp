@@ -54,6 +54,54 @@ static constexpr int kBarSlotIndex    = 0x18;
 // TimerSystemModule_t field offsets.
 static constexpr int kTSMTimerList    = 0x28;
 
+// ── N3InterfaceModule_t API — name resolution ───────────────────────────
+// Function pointers are cached in GUI.dll's data section, filled at
+// runtime by the game's module system.  Read via ReadCachedPtr.
+
+// GUI.dll data-section RVAs for N3InterfaceModule_t function pointers.
+static constexpr uint32_t kN3IMGetInstanceRVA = 0x1a772c;  // N3InterfaceModule_t::GetInstance
+static constexpr uint32_t kN3MsgGetNameRVA    = 0x1a7724;  // N3Msg_GetName
+
+using FnN3IMGetInstance = void*(__cdecl*)();
+using FnN3MsgGetName = const char*(__thiscall*)(void* n3im,
+                                                 const int* identity1,
+                                                 const int* identity2);
+
+// Unused API thunks kept for documentation / future use:
+//   kN3MsgGetSkillRVA    = 0x1a7728  — N3Msg_GetSkill(Stat_e, int), 2-param local player overload
+//   kN3MsgGetSkill4RVA   = 0x1a773c  — N3Msg_GetSkill(Identity_t&, Stat_e, int, Identity_t&), 4-param
+//   kN3MsgTemplateIDRVA  = 0x1a771c  — N3Msg_TemplateIDToDynelID(Identity_t const&)
+//   kLDBGetTextStrRVA    = 0x1a85c0  — LDBface::GetText(uint, char const*), string key overload
+//   kLDBGetTextIdRVA     = 0x1a85dc  — LDBface::GetText(uint, uint), numeric ID overload
+//   kStatCurrentNano     = 53        — player stat that holds some ID during nano cast
+
+// ── CastNanoSpell hook — captures nano identity at cast time ────────────
+// N3Msg_CastNanoSpell(Identity_t const&, Identity_t const&) is the function
+// GUI.dll calls to initiate a nano cast.  We hook it from Interfaces.dll to
+// capture the nano's real identity (type + AOID), which we then use for
+// name lookup when the timer bar is created moments later.
+
+using FnCastNanoSpell = void(__thiscall*)(void* n3im,
+                                          const int* nanoIdentity,
+                                          const int* targetIdentity);
+static FnCastNanoSpell g_origCastNanoSpell = nullptr;
+static int g_lastCastNanoId[2] = { 0, 0 };  // {type, instance} from last cast
+
+static void __fastcall CastNanoSpellDetour(void* ecx_this, void* /*edx*/,
+                                            const int* nanoId,
+                                            const int* targetId) {
+    if (nanoId) {
+        g_lastCastNanoId[0] = nanoId[0];
+        g_lastCastNanoId[1] = nanoId[1];
+        Log("[timerbar] CastNanoSpell: nano={0x%X,%d} target={0x%X,%d}",
+            nanoId[0], nanoId[1],
+            targetId ? targetId[0] : 0, targetId ? targetId[1] : 0);
+    }
+    g_origCastNanoSpell(ecx_this, nanoId, targetId);
+}
+
+// LDB function pointers — see "Unused API thunks" comments above.
+
 // ── GUI.dll function pointers ───────────────────────────────────────────
 
 static uintptr_t g_guiBase = 0;
@@ -282,9 +330,6 @@ static bool HitTestTimerBars(float px, float py, BarHitInfo* outHit) {
                 int bh = *reinterpret_cast<int*>(
                     reinterpret_cast<uintptr_t>(rw) + 0x38);
 
-                Log("[timerbar] hit test: bar rect=(%d,%d)-(%d,%d) cursor=(%.1f,%.1f)",
-                    bx, by, bx + bw, by + bh, px, py);
-
                 if (px >= bx && px < bx + bw &&
                     py >= by && py < by + bh) {
                     if (outHit) {
@@ -354,23 +399,62 @@ static void* __fastcall CreateTimerDetour(void* ecx_this, void* /*edx*/,
     void* bar = g_origCreateTimer(ecx_this, parent, identity, name, color);
 
     if (bar) {
-        int slot = *reinterpret_cast<int*>(
-            reinterpret_cast<uintptr_t>(bar) + kBarSlotIndex);
-        void* rw = *reinterpret_cast<void**>(
-            reinterpret_cast<uintptr_t>(bar) + kBarRenderWindow);
-        int spriteX = rw ? *reinterpret_cast<int*>(
-            reinterpret_cast<uintptr_t>(rw) + 0x2c) : -1;
-        int spriteY = rw ? *reinterpret_cast<int*>(
-            reinterpret_cast<uintptr_t>(rw) + 0x30) : -1;
-        Log("[timerbar] CreateTimer: bar=%p slot=%d rw=%p pos=(%d,%d) name=%s",
-            bar, slot, rw, spriteX, spriteY, name ? name : "(null)");
-
         RepositionBar(bar);
         if (g_barW != kDefaultBarW || g_barH != kDefaultBarH)
             ScaleBar(bar);
     }
 
     return bar;
+}
+
+// ── Nano name lookup ────────────────────────────────────────────────────
+// Read a cached function pointer from GUI.dll's data section.
+template<typename T>
+static T ReadCachedPtr(uint32_t rva) {
+    return *reinterpret_cast<T*>(g_guiBase + rva);
+}
+
+// Try to get the nano name.  wp_lo is the raw TimerEntry_t* from the
+// weak_ptr passed to CreateGameTimer.  identity is {type, instance} but
+// for nano timers instance is always 0.  The actual nano AOID is
+// somewhere in the TimerEntry_t.
+static const char* TryGetNanoName(const void* identity) {
+    if (!identity) return nullptr;
+
+    auto* id = reinterpret_cast<const int*>(identity);
+    if (id[0] != 3) return nullptr;  // only nano timers (type 3)
+
+    // Use the nano identity captured from CastNanoSpell hook.
+    if (g_lastCastNanoId[0] == 0 && g_lastCastNanoId[1] == 0) {
+        Log("[timerbar] no captured nano identity");
+        return nullptr;
+    }
+
+    auto getInst = ReadCachedPtr<FnN3IMGetInstance>(kN3IMGetInstanceRVA);
+    auto getName = ReadCachedPtr<FnN3MsgGetName>(kN3MsgGetNameRVA);
+    if (!getInst || !getName) return nullptr;
+
+    void* n3im = getInst();
+    if (!n3im) return nullptr;
+
+    // Try GetName with the captured identity directly.
+    int zeroId[2] = { 0, 0 };
+    const char* result = getName(n3im, g_lastCastNanoId, zeroId);
+    if (result && result[0] && std::strcmp(result, "NoName") != 0) {
+        Log("[timerbar] nano name (from CastNanoSpell id): \"%s\"", result);
+        return result;
+    }
+
+    // Try reversed parameter order.
+    result = getName(n3im, zeroId, g_lastCastNanoId);
+    if (result && result[0] && std::strcmp(result, "NoName") != 0) {
+        Log("[timerbar] nano name (reversed): \"%s\"", result);
+        return result;
+    }
+
+    Log("[timerbar] GetName failed for nano id={0x%X,%d}",
+        g_lastCastNanoId[0], g_lastCastNanoId[1]);
+    return nullptr;
 }
 
 // ── CreateGameTimer hook (overload 2 — equip, nano, attack, reload) ────
@@ -382,21 +466,17 @@ static void* __fastcall CreateGameTimerDetour(void* ecx_this, void* /*edx*/,
     if (!g_timerSystemModule)
         g_timerSystemModule = ecx_this;
 
+    // For nano timers, try to replace the generic "Nano program" label
+    // with the actual nano program name.
+    const char* actualName = name;
+    const char* nanoName = TryGetNanoName(identity);
+    if (nanoName)
+        actualName = nanoName;
+
     void* bar = g_origCreateGameTimer(ecx_this, wp_lo, wp_hi,
-                                       identity, name, color);
+                                       identity, actualName, color);
 
     if (bar) {
-        int slot = *reinterpret_cast<int*>(
-            reinterpret_cast<uintptr_t>(bar) + kBarSlotIndex);
-        void* rw = *reinterpret_cast<void**>(
-            reinterpret_cast<uintptr_t>(bar) + kBarRenderWindow);
-        int spriteX = rw ? *reinterpret_cast<int*>(
-            reinterpret_cast<uintptr_t>(rw) + 0x2c) : -1;
-        int spriteY = rw ? *reinterpret_cast<int*>(
-            reinterpret_cast<uintptr_t>(rw) + 0x30) : -1;
-        Log("[timerbar] CreateGameTimer: bar=%p slot=%d rw=%p pos=(%d,%d) name=%s",
-            bar, slot, rw, spriteX, spriteY, name ? name : "(null)");
-
         RepositionBar(bar);
         if (g_barW != kDefaultBarW || g_barH != kDefaultBarH)
             ScaleBar(bar);
@@ -415,14 +495,8 @@ static bool TimerBarMouseFilter(MouseEventType type, const float* pos_or_delta,
         if (button != 1) return false;
         if (!pos_or_delta) return false;
 
-        // Log both the pos parameter and the WC cursor for comparison.
         float cx, cy;
-        if (!GetCursorPos(cx, cy)) {
-            Log("[timerbar] filter: GetCursorPos failed");
-            return false;
-        }
-        Log("[timerbar] filter Down: pos=(%.1f,%.1f) WC_cursor=(%.1f,%.1f)",
-            pos_or_delta[0], pos_or_delta[1], cx, cy);
+        if (!GetCursorPos(cx, cy)) return false;
 
         BarHitInfo hit{};
         if (!HitTestTimerBars(cx, cy, &hit))
@@ -512,7 +586,10 @@ bool InitTimerBarDrag() {
     }
     g_guiBase = reinterpret_cast<uintptr_t>(gui);
 
-    // Resolve function pointers.
+    // Resolve GUI.dll function pointers.
+    // N3Msg_GetName and N3InterfaceModule_t::GetInstance are cached
+    // function pointers at known GUI.dll data section RVAs — resolved
+    // lazily by ReadCachedPtr in TryGetNanoName.
     g_rwReposition = reinterpret_cast<FnRWReposition>(
         g_guiBase + kRWRepositionRVA);
     g_rwSetScale = reinterpret_cast<FnRWSetScale>(
@@ -560,6 +637,31 @@ bool InitTimerBarDrag() {
         } else {
             g_origCreateGameTimer = reinterpret_cast<FnCreateGameTimer>(tramp2);
             Log("[timerbar] CreateGameTimer hook installed");
+        }
+    }
+
+    // Hook CastNanoSpell from Interfaces.dll for nano name capture.
+    {
+        HMODULE iface = GetModuleHandleA("Interfaces.dll");
+        if (iface) {
+            void* castAddr = reinterpret_cast<void*>(GetProcAddress(iface,
+                "?N3Msg_CastNanoSpell@N3InterfaceModule_t@@QBEXABVIdentity_t@@0@Z"));
+            Log("[timerbar] CastNanoSpell at %p", castAddr);
+            if (castAddr) {
+                auto* bytes3 = static_cast<uint8_t*>(castAddr);
+                Log("[timerbar] CastNanoSpell prologue: %02X %02X %02X %02X %02X",
+                    bytes3[0], bytes3[1], bytes3[2], bytes3[3], bytes3[4]);
+                void* tramp3 = nullptr;
+                if (InstallHook(castAddr, reinterpret_cast<void*>(&CastNanoSpellDetour),
+                                &tramp3)) {
+                    g_origCastNanoSpell = reinterpret_cast<FnCastNanoSpell>(tramp3);
+                    Log("[timerbar] CastNanoSpell hook installed");
+                } else {
+                    Log("[timerbar] CastNanoSpell hook failed");
+                }
+            }
+        } else {
+            Log("[timerbar] Interfaces.dll not loaded");
         }
     }
 

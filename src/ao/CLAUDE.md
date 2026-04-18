@@ -323,9 +323,45 @@ Sentinel = *(TimerSystemModule_t + 0x28)
 - Text stored at `+0x18` as `std::string` (MSVC 2010 SSO layout)
 - `SetDefaultColor(int)` at RVA `0x223ef`
 
+## GUI.dll — N3InterfaceModule_t cached function pointers
+
+Function pointers for N3InterfaceModule_t methods are cached in GUI.dll's data section, populated at runtime by the AFCM module system. Access via `ReadCachedPtr<FnType>(rva)`.
+
+| Function | Data RVA | Signature |
+|----------|----------|-----------|
+| GetInstance | 0x1a772c | `void* __cdecl()` |
+| N3Msg_GetName | 0x1a7724 | `const char* __thiscall(void*, Identity_t const&, Identity_t const&)` |
+| N3Msg_GetRarityColor | 0x1a7720 | similar to GetName |
+| N3Msg_TemplateIDToDynelID | 0x1a771c | `Identity_t __thiscall(void*, Identity_t const&)` (hidden ret ptr) |
+| N3Msg_GetSkill (2-param) | 0x1a7728 | `int __thiscall(void*, Stat_e, int)` — local player |
+| N3Msg_GetSkill (4-param) | 0x1a773c | `int __thiscall(void*, Identity_t const&, Stat_e, int, Identity_t const&)` |
+
+**N3Msg_GetName** works with dynel identities (runtime objects), NOT template AOIDs. For nano programs: capture the identity from `CastNanoSpell` (type `0xCF1B`, instance = nano AOID), then pass to `GetName`. Timer identities `{3, 0}` return "NoName".
+
+## Interfaces.dll — N3Msg_CastNanoSpell
+
+`N3Msg_CastNanoSpell(Identity_t const&, Identity_t const&)` — mangled `?N3Msg_CastNanoSpell@N3InterfaceModule_t@@QBEXABVIdentity_t@@0@Z`. Exported from Interfaces.dll. Called by GUI.dll when the player initiates a nano cast.
+
+- Prologue: `55 8B EC 8B 0D` (frame + `MOV ECX,[addr32]`) — requires 9-byte copy in hook engine
+- First param: nano identity `{0xCF1B, aoid}`
+- Second param: target identity `{0xC350, char_id}`
+
+## ResourceManager.dll — RDB access
+
+Exported functions for synchronous resource loading:
+
+| Function | Mangled | Notes |
+|----------|---------|-------|
+| `ResourceManager::Get()` | `?Get@ResourceManager@@SAAAV1@XZ` | Static singleton, returns `ResourceManager&` |
+| `ResourceManager::GetSync(Identity_t const&, bool)` | `?GetSync@ResourceManager@@QAEPAVDbObject_t@@ABVIdentity_t@@_N@Z` | Loads resource from rdb.db |
+
+RDB identity uses `{TypeID_e, asset_id}` where TypeID_e is the table suffix (e.g., 1000020 for items). The rdb.db is SQLite3 with tables named `rdb_<TypeID>`.
+
 ## Hook engine (`src/hooks/hook_engine.cpp`)
 
 Prologue whitelist includes `B8 xx xx xx xx` (`mov eax, imm32`) — the 5-byte MSVC SEH-prolog entry thunk used by functions with try/catch. The instruction is IP-independent and copies cleanly into the trampoline.
+
+The engine now supports **variable-length prologues**: `55 8B EC 8B 0D xx xx xx xx` (`push ebp; mov ebp,esp; mov ecx,[addr32]`) copies 9 bytes into the trampoline. The `MOV ECX,[addr32]` uses absolute addressing so it's safe to relocate. The 5-byte JMP at the original overwrites bytes 0-4; the remaining bytes 5-8 are dead code after the JMP.
 
 **Known limitation:** The `frame+push-r` patterns (`55 8B EC 5x xx`) wildcard the 5th byte (`0x00` mask). If the 5th byte starts a multi-byte instruction (e.g. `8B F1` = `MOV ESI,ECX`), the 5-byte copy splits it — the trampoline executes a garbled instruction and the jump-back lands mid-instruction. Safe only when byte 4 is a complete 1-byte instruction (PUSH r32 range `0x50-0x57`).
 

@@ -33,10 +33,17 @@ When a text input (e.g. chat) has focus, prevents numpad keys from triggering ca
 
 **Config:** Options panel (F10) → **AOReloaded** tab → **Input** → "Numpad keys type in chat". Enabled by default.
 
-### Draggable Timer Bars
-The action timer bars (nano casting, item equip/unequip, reload, attack cooldown) can be repositioned by clicking and dragging any active bar. The entire group moves together. Position is saved automatically and persists across sessions.
+### Enhanced Timer Bars
+The action timer bars (nano casting, item equip/unequip, reload, attack cooldown) have been enhanced:
 
-**Config:** None — always on. Drag any timer bar to reposition.
+- **Draggable** — click and drag any active bar to reposition. The entire group moves together. Position persists across sessions.
+- **Resizable** — adjust width and height via sliders in the options panel. The bar scales visually including the progress fill.
+- **Nano program name** — when casting a nano, the bar displays the actual nano program name (e.g. "Balanced Striker") instead of the generic "Nano program" label.
+
+**Config:** Options panel (F10) → **AOReloaded** tab → **Timer Bars**:
+- X/Y position sliders (default: 40, 40). Can also be set by dragging bars in-game.
+- Width slider (default: 128)
+- Height slider (default: 16)
 
 <!-- 
 Template for adding features:
