@@ -36,16 +36,15 @@ When a text input (e.g. chat) has focus, prevents numpad keys from triggering ca
 ### Enhanced Timer Bars
 The action timer bars (nano casting, item equip/unequip, reload, attack cooldown) have been enhanced:
 
-- **Draggable** — click and drag any active bar to reposition. The entire group moves together. Position persists across sessions.
-- **Resizable** — adjust width and height via sliders in the options panel. The bar scales visually including the progress fill.
+- **Configurable position and size** — set X/Y position, width, and height via sliders. Positions persist across sessions. Bars stack vertically with a 4-pixel gap regardless of height.
 - **Nano program name** — when casting a nano, the bar displays the actual nano program name (e.g. "Balanced Striker") instead of the generic "Nano program" label.
-- **Preview mode** — tick the "Show preview bars" checkbox to spawn five static dummy bars (one per in-game type: Attack, Special, Nano, Item, Reload) at your configured position and size. Drag them to pick a spot and tune the width/height sliders with immediate visual feedback, without having to trigger a real cast. Untick the checkbox to remove them. Labels double as a colour legend so you can see which colour maps to which bar type.
+- **Preview & drag-to-position mode** — tick the "Show preview bars" checkbox to spawn five static dummy bars (one per in-game type: Attack, Special, Nano, Item, Reload) at your configured position and size. While this mode is on you can click and drag any bar to reposition the whole group, and the width/height sliders update all five previews live. Untick the checkbox when you're done: preview bars disappear, real bars go back to being purely informational, and clicks on them pass straight through to the game. Labels double as a colour legend so you can see which colour maps to which bar type.
 
 **Config:** Options panel (F10) → **AOReloaded** tab → **Timer Bars**:
-- X/Y position sliders (default: 40, 40). Can also be set by dragging bars in-game.
+- X/Y position sliders (default: 40, 40). Can also be set by dragging while preview mode is on.
 - Width slider (default: 128)
 - Height slider (default: 16)
-- "Show preview bars" checkbox — toggles the five dummy bars for positioning. Disabled by default.
+- "Show preview bars" checkbox — toggles the five dummy bars AND enables drag-to-reposition. Disabled by default.
 
 <!-- 
 Template for adding features:

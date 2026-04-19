@@ -733,6 +733,12 @@ static bool TimerBarMouseFilter(MouseEventType type, const float* pos_or_delta,
         // Only handle LMB (button 1).
         if (button != 1) return false;
         if (!pos_or_delta) return false;
+        // Drag-to-reposition is a configuration tool, not a live-gameplay
+        // interaction: bars only swallow clicks while the preview stack is
+        // visible.  When preview is off, all clicks pass through to the
+        // game's normal handlers — real cast/reload bars remain purely
+        // informational and never intercept input.
+        if (!g_previewEnabled) return false;
 
         float cx, cy;
         if (!GetCursorPos(cx, cy)) return false;
