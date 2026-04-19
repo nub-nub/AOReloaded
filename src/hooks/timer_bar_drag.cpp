@@ -29,11 +29,15 @@ namespace aor {
 
 // ── Constants ───────────────────────────────────────────────────────────
 
-// Stock default position: X = 40, Y = 40.  Bars stack vertically at 20px spacing.
+// Stock default position: X = 40, Y = 40.  Default bar is 128×16 with a 20px
+// slot pitch — i.e. 4px of padding between stacked bars.  We preserve that
+// 4px padding and derive the runtime slot pitch from the current bar height
+// so tall bars don't overlap and short bars don't leave gaps.
 static constexpr int kDefaultX        = 0x28;   // 40
 static constexpr int kDefaultBarW     = 0x80;   // 128
 static constexpr int kDefaultBarH     = 0x10;   // 16
-static constexpr int kSlotHeight      = 0x14;   // 20
+static constexpr int kDefaultSlotPitch = 0x14;  // 20 — stock game value
+static constexpr int kSlotPadding     = kDefaultSlotPitch - kDefaultBarH;  // 4
 
 // GUI.dll RVAs.
 static constexpr uint32_t kCreateTimerRVA       = 0x518f0;   // TimerBar_c path (logout, camp)
@@ -236,8 +240,10 @@ static void* GetTSM() {
             // g_timerSystemModule is already set above.
             if (g_posX != kDefaultX || g_posY != kDefaultX)
                 RepositionAllBars();
-            if (g_barW != kDefaultBarW || g_barH != kDefaultBarH)
-                ScaleAllBars();
+            // Always scale to force visible size = (g_barW, g_barH) regardless
+            // of the bar's natural texture dimensions.  The scale factor is
+            // derived from the actual stored base, not from kDefault*.
+            ScaleAllBars();
             // Preview mode may have been enabled via settings before the
             // TSM singleton was resolvable.  Spawn the dummies now that it
             // exists.  SpawnPreviewBars is idempotent — it no-ops if the
@@ -257,9 +263,14 @@ static void RepositionBar(void* barBase) {
     int slot = *reinterpret_cast<int*>(
         reinterpret_cast<uintptr_t>(barBase) + kBarSlotIndex);
 
+    // Slot pitch scales with the current bar height so tall bars don't
+    // overlap and short bars don't leave gaps.  4px padding matches the
+    // stock game value (20 pitch − 16 bar = 4).
+    const int slotPitch = g_barH + kSlotPadding;
+
     int pos[2];
     pos[0] = g_posX;
-    pos[1] = g_posY + slot * kSlotHeight;
+    pos[1] = g_posY + slot * slotPitch;
 
     if (rw && g_rwReposition)
         g_rwReposition(rw, pos);
@@ -294,23 +305,34 @@ static void ScaleBar(void* barBase) {
         reinterpret_cast<uintptr_t>(barBase) + kBarRenderWindow);
     if (!rw || !g_rwSetScale || !g_rwResize) return;
 
-    float sx = static_cast<float>(g_barW) / static_cast<float>(kDefaultBarW);
-    float sy = static_cast<float>(g_barH) / static_cast<float>(kDefaultBarH);
+    // The bar's natural (texture-derived) base size is stored at +0x34/+0x38.
+    // TimerBarBase_c's constructor Resizes the RenderWindow to the fill
+    // sprite's GetOriginalSize() — i.e. whatever the GFX asset (0x1a9) is,
+    // which is NOT 128×16.  Scaling relative to the hardcoded 128×16
+    // "default" produced a visual height of `base_h × g_barH/16` instead of
+    // g_barH, making the gap between stacked bars grow with scale.  Scale
+    // relative to the actual base so visual_size == (g_barW, g_barH) exactly,
+    // which is the contract the slot-pitch formula relies on.
+    int baseW = *reinterpret_cast<int*>(reinterpret_cast<uintptr_t>(rw) + 0x34);
+    int baseH = *reinterpret_cast<int*>(reinterpret_cast<uintptr_t>(rw) + 0x38);
+    if (baseW <= 0 || baseH <= 0) return;
+
+    float sx = static_cast<float>(g_barW) / static_cast<float>(baseW);
+    float sy = static_cast<float>(g_barH) / static_cast<float>(baseH);
 
     // Step 1: Set scale factors on all tiles (updates dest dimensions but
     //         does NOT rebuild GPU quad vertices).
     g_rwSetScale(rw, &sx, &sy);
 
-    // Step 2: Trigger a Resize with the CURRENT stored size.  This calls
+    // Step 2: Trigger a Resize with the CURRENT stored base.  This calls
     //         RenderSprite_t::Resize on each tile, which reads the scale
-    //         values we just set and rebuilds the GPU quad vertices.
-    int currentSize[2];
-    currentSize[0] = *reinterpret_cast<int*>(reinterpret_cast<uintptr_t>(rw) + 0x34);
-    currentSize[1] = *reinterpret_cast<int*>(reinterpret_cast<uintptr_t>(rw) + 0x38);
+    //         values we just set and rebuilds the GPU quad vertices at
+    //         (base × scale) = (g_barW, g_barH).
+    int currentSize[2] = { baseW, baseH };
     g_rwResize(rw, currentSize);
 
-    Log("[timerbar] ScaleBar: scale=(%.2f,%.2f) rwSize=(%d,%d)", sx, sy,
-        currentSize[0], currentSize[1]);
+    Log("[timerbar] ScaleBar: base=(%d,%d) scale=(%.3f,%.3f) → visual=(%d,%d)",
+        baseW, baseH, sx, sy, g_barW, g_barH);
 }
 
 // Walk the game's timer bar list and resize every bar.
@@ -432,8 +454,7 @@ static void SpawnPreviewBars() {
         // Our CreateTimerDetour wasn't re-entered (we called the trampoline
         // directly), so apply the saved position/scale manually.
         RepositionBar(bar);
-        if (g_barW != kDefaultBarW || g_barH != kDefaultBarH)
-            ScaleBar(bar);
+        ScaleBar(bar);
 
         g_previewBars[t - 1] = bar;
         Log("[timerbar] preview: spawned type=%d bar=%p label=\"%s\"",
@@ -620,8 +641,7 @@ static void* __fastcall CreateTimerDetour(void* ecx_this, void* /*edx*/,
 
     if (bar) {
         RepositionBar(bar);
-        if (g_barW != kDefaultBarW || g_barH != kDefaultBarH)
-            ScaleBar(bar);
+        ScaleBar(bar);
     }
 
     return bar;
@@ -698,8 +718,7 @@ static void* __fastcall CreateGameTimerDetour(void* ecx_this, void* /*edx*/,
 
     if (bar) {
         RepositionBar(bar);
-        if (g_barW != kDefaultBarW || g_barH != kDefaultBarH)
-            ScaleBar(bar);
+        ScaleBar(bar);
     }
 
     return bar;
@@ -724,9 +743,10 @@ static bool TimerBarMouseFilter(MouseEventType type, const float* pos_or_delta,
 
         // Derive the actual position from where the bar really is, not from
         // the saved DValue.  Bars may have been created at the default
-        // position through a path that ran before our hook was ready.
+        // position through a path that ran before our hook was ready.  The
+        // inverse slot formula must use the same pitch RepositionBar uses.
         g_posX = hit.actualX;
-        g_posY = hit.actualY - hit.slot * kSlotHeight;
+        g_posY = hit.actualY - hit.slot * (g_barH + kSlotPadding);
 
         // Start drag.
         g_dragging = true;
@@ -793,6 +813,10 @@ static void OnSettingChanged(const char* name, int newValue) {
     } else if (std::strcmp(name, "AOR_TBarH") == 0) {
         g_barH = newValue;
         ScaleAllBars();
+        // Slot pitch is derived from g_barH, so changing height must also
+        // re-apply the per-slot Y offset or stacked bars would overlap or
+        // gap apart as the user drags the slider.
+        RepositionAllBars();
     } else if (std::strcmp(name, "AOR_TBarPrev") == 0) {
         bool enabled = (newValue != 0);
         if (enabled == g_previewEnabled) return;
