@@ -54,6 +54,42 @@ static constexpr int kBarSlotIndex    = 0x18;
 // TimerSystemModule_t field offsets.
 static constexpr int kTSMTimerList    = 0x28;
 
+// ── Preview-bar constants ───────────────────────────────────────────────
+
+// Canonical colours per Timer_* type — sourced from StartTimerBar's dispatcher
+// in GUI.dll.  Index is the identity type (1..5).
+static constexpr uint32_t kTypeColors[6] = {
+    0,          // 0 unused
+    0xaaffaa,   // 1 Timer_Attack  (green)
+    0xaaffff,   // 2 Timer_Special (cyan)
+    0xffaaaa,   // 3 Timer_Nano    (red)
+    0xaaaaff,   // 4 Timer_Item    (blue)
+    0xffffff,   // 5 Timer_Reload  (white)
+};
+
+// Labels double as a colour legend — the user sees which colour maps to which
+// in-game bar type.
+static const char* const kTypeLabels[6] = {
+    nullptr, "Attack", "Special", "Nano", "Item", "Reload"
+};
+
+// Preview instance IDs occupy the top of int32 range so they can never
+// collide with real AOIDs, which cluster near zero.  Identities are stored
+// as two signed ints in-game, so 0x7FFFFFF1..0x7FFFFFF5 are safe.
+static constexpr int kPreviewInstanceBase = 0x7FFFFFF0;
+
+// PowerBar_t::AdjustPowerLevel(float) — GUI.dll RVA 0x205de.  Sets fill 0..1.
+static constexpr uint32_t kPBAdjustPowerLevelRVA = 0x205de;
+
+// TSM::StopTimerbarMessage at GUI.dll RVA 0x518b0 — verified via Ghidra.
+// Walks the timer list, matches by (type, instance) with instance==-1 acting
+// as a type-wide wildcard, and calls the private TSM::DeleteTimer on matches.
+// DeleteTimer frees slot_flags[slot_index] at TSM+0x34, invokes the bar's
+// scalar-deleting destructor at vftable[1] (arg=1 → run dtor + operator
+// delete), then erases the std::list node cleanly.  End-to-end zero-leak
+// removal — preferred over our manual fallback.
+static constexpr uint32_t kTSMStopTimerbarRVA = 0x518b0;
+
 // ── N3InterfaceModule_t API — name resolution ───────────────────────────
 // Function pointers are cached in GUI.dll's data section, filled at
 // runtime by the game's module system.  Read via ReadCachedPtr.
@@ -131,6 +167,19 @@ static FnTSMGetInstance g_tsmGetInstance = nullptr;
 using FnWCGetInstance = void*(__cdecl*)();
 static FnWCGetInstance g_wcGetInstance = nullptr;
 
+// PowerBar_t::AdjustPowerLevel(float progress) — sets the progress fill
+// on a timer bar's PowerBar_t* (TimerBarBase_c+0x08).  progress is clamped
+// to [0, 1].  Used to force preview bars to full fill.
+using FnPBAdjustPowerLevel = void(__thiscall*)(void* powerBar, float progress);
+static FnPBAdjustPowerLevel g_pbAdjustPowerLevel = nullptr;
+
+// TSM::StopTimerbarMessage(Identity_t) — dedicated remover.  Identity_t is
+// passed by value (8 bytes), which on MSVC x86 __thiscall flattens to two
+// int stack arguments: (type, instance).  instance==-1 acts as a wildcard
+// removing all bars of the given type.
+using FnTSMStopTimerbar = void(__thiscall*)(void* tsm, int type, int instance);
+static FnTSMStopTimerbar g_tsmStopTimerbar = nullptr;
+
 // ── CreateTimer hook types ──────────────────────────────────────────────
 
 // Overload 1: TimerBar_c* __thiscall CreateTimer(int, Identity_t const&,
@@ -156,6 +205,8 @@ static int  g_posX = kDefaultX;      // absolute X position (AOR_TBarX)
 static int  g_posY = kDefaultX;      // absolute Y of first bar (AOR_TBarY); default 40
 static int  g_barW = kDefaultBarW;   // bar width (AOR_TBarW)
 static int  g_barH = kDefaultBarH;   // bar height (AOR_TBarH)
+static bool g_previewEnabled = false; // AOR_TBarPrev — show 5 dummy bars for configuring
+static void* g_previewBars[5] = {};   // preview bar pointers (one per type 1..5), or nullptr
 static bool g_dragging = false;
 static float g_dragStartCursorX = 0;
 static float g_dragStartCursorY = 0;
@@ -168,6 +219,8 @@ static void* g_timerSystemModule = nullptr;
 // Forward declarations — called from GetTSM on first resolution.
 static void RepositionAllBars();
 static void ScaleAllBars();
+static void SpawnPreviewBars();
+static void DespawnPreviewBars();
 
 // Get the TimerSystemModule_t singleton. Tries cached pointer first,
 // then falls back to calling GetInstance().
@@ -185,6 +238,12 @@ static void* GetTSM() {
                 RepositionAllBars();
             if (g_barW != kDefaultBarW || g_barH != kDefaultBarH)
                 ScaleAllBars();
+            // Preview mode may have been enabled via settings before the
+            // TSM singleton was resolvable.  Spawn the dummies now that it
+            // exists.  SpawnPreviewBars is idempotent — it no-ops if the
+            // bars are already present.
+            if (g_previewEnabled && !g_previewBars[0])
+                SpawnPreviewBars();
         }
     }
     return g_timerSystemModule;
@@ -269,6 +328,142 @@ static void ScaleAllBars() {
         if (barBase)
             ScaleBar(barBase);
         node = reinterpret_cast<void**>(*node);
+    }
+}
+
+// ── Preview bars ────────────────────────────────────────────────────────
+//
+// The preview mode spawns one dummy bar of each in-game type so the user
+// can configure position/size without needing to trigger a real cast.
+// Dummies are real TimerBarBase_c / GameTimerBar_c instances joining the
+// same std::list as live bars, so RepositionAllBars / ScaleAllBars and
+// the mouse drag hit-test handle them automatically.
+
+// Find the std::list node containing the given bar pointer.  Returns
+// nullptr if not found.  The list stores the bar at node[2] (offset 0x08
+// — past prev/next pointers).
+static void** FindListNodeFor(void* tsm, void* bar) {
+    auto** sentinel = *reinterpret_cast<void***>(
+        reinterpret_cast<uintptr_t>(tsm) + kTSMTimerList);
+    if (!sentinel) return nullptr;
+
+    auto** node = reinterpret_cast<void**>(*sentinel);
+    while (node != sentinel) {
+        if (node[2] == bar) return node;
+        node = reinterpret_cast<void**>(*node);
+    }
+    return nullptr;
+}
+
+// Fallback destruction path, retained for robustness when
+// g_tsmStopTimerbar fails to resolve.  Unlinks the list node, invokes the
+// bar's scalar-deleting destructor at vftable[1] (index confirmed by
+// decompiling TimerSystemModule_t::DeleteTimer, which uses the same slot),
+// which runs ~TimerBarBase_c (freeing RenderWindow_t, PowerBar_t,
+// TextLine_t via member dtors) and calls GUI.dll's operator delete on the
+// bar itself.
+//
+// Caveats versus the preferred StopTimerbarMessage path:
+//   - The std::list node (12 bytes on 32-bit MSVC STL: next, prev, data)
+//     is leaked — its allocator is the game's static CRT and cross-DLL
+//     operator delete is unsafe.
+//   - The TSM slot_flags[slot_index] byte at TSM+0x34 is not cleared,
+//     so the freed slot stays marked occupied until the next frame where
+//     FindNextFreePos scans.  Not a correctness issue — at worst the next
+//     real bar uses a later slot.
+static void ManualRemoveBar(void* tsm, void* bar) {
+    void** node = FindListNodeFor(tsm, bar);
+    if (!node) {
+        Log("[timerbar] preview: ManualRemoveBar — bar %p not in list", bar);
+        return;
+    }
+
+    // std::list node layout: [0]=next, [1]=prev, [2]=data.
+    void** next = reinterpret_cast<void**>(node[0]);
+    void** prev = reinterpret_cast<void**>(node[1]);
+    if (prev) prev[0] = next;
+    if (next) next[1] = prev;
+
+    // Scalar-deleting destructor lives at vftable[1] for TimerBarBase_c
+    // (vftable[0] is a SignalTarget_c-inherited virtual).  Verified by
+    // decompiling TSM::DeleteTimer, which calls *(vftable+4)(1).
+    auto vftbl = *reinterpret_cast<void***>(bar);
+    if (vftbl && vftbl[1]) {
+        using FnScalarDeletingDtor = void*(__thiscall*)(void*, int);
+        auto dtor = reinterpret_cast<FnScalarDeletingDtor>(vftbl[1]);
+        dtor(bar, 1);
+    }
+}
+
+static void SpawnPreviewBars() {
+    void* tsm = GetTSM();
+    if (!tsm || !g_origCreateTimer) {
+        Log("[timerbar] preview: cannot spawn — tsm=%p origCreateTimer=%p",
+            tsm, reinterpret_cast<void*>(g_origCreateTimer));
+        return;
+    }
+    if (g_previewBars[0]) return;  // already spawned — idempotent
+
+    Log("[timerbar] preview: spawning 5 dummy bars (tid=%lu)",
+        GetCurrentThreadId());
+
+    for (int t = 1; t <= 5; ++t) {
+        int identity[2] = { t, kPreviewInstanceBase + t };
+
+        // Overload 1 (CreateTimer with int parent) is the path used for
+        // logout/camp bars — they don't require a TimerEntry_t, which
+        // means no per-frame update loop will try to dereference a null
+        // weak_ptr.  parent=0 = no owning widget (root).
+        void* bar = g_origCreateTimer(tsm, /*parent*/ 0, identity,
+                                       kTypeLabels[t], kTypeColors[t]);
+        if (!bar) {
+            Log("[timerbar] preview: CreateTimer(type=%d) returned null", t);
+            continue;
+        }
+
+        // Full fill — user chose static "full" bars.  If AdjustPowerLevel
+        // failed to resolve, the bar stays at whatever progress the
+        // constructor initialised it to.
+        void* pb = *reinterpret_cast<void**>(
+            reinterpret_cast<uintptr_t>(bar) + 0x08);  // kBarPowerBar
+        if (pb && g_pbAdjustPowerLevel)
+            g_pbAdjustPowerLevel(pb, 1.0f);
+
+        // Our CreateTimerDetour wasn't re-entered (we called the trampoline
+        // directly), so apply the saved position/scale manually.
+        RepositionBar(bar);
+        if (g_barW != kDefaultBarW || g_barH != kDefaultBarH)
+            ScaleBar(bar);
+
+        g_previewBars[t - 1] = bar;
+        Log("[timerbar] preview: spawned type=%d bar=%p label=\"%s\"",
+            t, bar, kTypeLabels[t]);
+    }
+}
+
+static void DespawnPreviewBars() {
+    void* tsm = GetTSM();
+    if (!tsm) {
+        // Nothing to remove — TSM never came up.  Clear the slots so a
+        // later spawn doesn't think bars already exist.
+        for (int i = 0; i < 5; ++i) g_previewBars[i] = nullptr;
+        return;
+    }
+
+    Log("[timerbar] preview: despawning (tid=%lu)", GetCurrentThreadId());
+
+    for (int t = 1; t <= 5; ++t) {
+        void* bar = g_previewBars[t - 1];
+        if (!bar) continue;
+
+        if (g_tsmStopTimerbar) {
+            // Identity_t passed by value: (type, instance).
+            g_tsmStopTimerbar(tsm, t, kPreviewInstanceBase + t);
+        } else {
+            ManualRemoveBar(tsm, bar);
+        }
+        g_previewBars[t - 1] = nullptr;
+        Log("[timerbar] preview: despawned type=%d", t);
     }
 }
 
@@ -370,7 +565,12 @@ static void LoadPosition() {
         v.type == static_cast<uint32_t>(VariantType::Int)) {
         g_barH = v.as_int;
     }
-    Log("[timerbar] loaded pos=(%d,%d) size=(%d,%d)", g_posX, g_posY, g_barW, g_barH);
+    if (GameAPI::GetVariant("AOR_TBarPrev", v) &&
+        v.type == static_cast<uint32_t>(VariantType::Bool)) {
+        g_previewEnabled = v.as_bool;
+    }
+    Log("[timerbar] loaded pos=(%d,%d) size=(%d,%d) preview=%d",
+        g_posX, g_posY, g_barW, g_barH, g_previewEnabled ? 1 : 0);
 }
 
 static void SavePosition() {
@@ -573,6 +773,14 @@ static void OnSettingChanged(const char* name, int newValue) {
     } else if (std::strcmp(name, "AOR_TBarH") == 0) {
         g_barH = newValue;
         ScaleAllBars();
+    } else if (std::strcmp(name, "AOR_TBarPrev") == 0) {
+        bool enabled = (newValue != 0);
+        if (enabled == g_previewEnabled) return;
+        g_previewEnabled = enabled;
+        if (enabled)
+            SpawnPreviewBars();
+        else
+            DespawnPreviewBars();
     }
 }
 
@@ -600,6 +808,10 @@ bool InitTimerBarDrag() {
         g_guiBase + 0x51d05);  // TimerSystemModule_t::GetInstance
     g_wcGetInstance = reinterpret_cast<FnWCGetInstance>(
         g_guiBase + 0xb454);  // WindowController_c::GetInstance
+    g_pbAdjustPowerLevel = reinterpret_cast<FnPBAdjustPowerLevel>(
+        g_guiBase + kPBAdjustPowerLevelRVA);  // PowerBar_t::AdjustPowerLevel
+    g_tsmStopTimerbar = reinterpret_cast<FnTSMStopTimerbar>(
+        g_guiBase + kTSMStopTimerbarRVA);     // TSM::StopTimerbarMessage
 
     // Load saved position from DValues.
     LoadPosition();

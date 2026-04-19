@@ -52,6 +52,7 @@ static SettingDef g_settings[] = {
     { "AOR_TBarY",     SettingType::Int,  40,      40,      0, 4096 },
     { "AOR_TBarW",     SettingType::Int, 128,     128,     32, 1024 },
     { "AOR_TBarH",     SettingType::Int,  16,      16,      8,  128 },
+    { "AOR_TBarPrev",  SettingType::Bool,  0,       0,      0,    1 },
 };
 
 static constexpr int kSettingCount = sizeof(g_settings) / sizeof(g_settings[0]);
@@ -358,6 +359,8 @@ static const char kAorXmlBlock[] =
     "        <OptionSlider label=\"Height (default: 16):\""
     " layout_borders=\"Rect(10,0,0,3)\" opt_type=\"variant\" opt_variable=\"AOR_TBarH\""
     " value_fmt=\"&lt;font color=#70C4D0&gt;%.0f&lt;/font&gt;\" value_scale=\"1\"/>\n"
+    "        <OptionCheckBox label=\"Enable cast bar preview (stack extends downwards from the topmost bar)\""
+    " layout_borders=\"Rect(10,5,0,0)\" opt_type=\"variant\" opt_variable=\"AOR_TBarPrev\"/>\n"
     "\n"
     "        <TextView value=\"Input\" layout_borders=\"Rect(0,10,0,3)\" />\n"
     "        <OptionCheckBox label=\"Numpad keys type in chat fix\""

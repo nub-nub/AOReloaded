@@ -252,17 +252,17 @@ Manages the action timer bars (nano cast, item equip, reload, attack cooldown).
 |----------|-----|----------|-------|
 | GetInstance (static, lazy) | 0x51d05 | B8 imm32 (SEH) | Static ptr at 0x1818ba |
 | CreateTimer | 0x518f0 | B8 imm32 (SEH) | `TimerBar_c* __thiscall(int, Identity_t const&, char const*, uint)` |
-| DeleteTimer | 0x517dd | — | Private, takes list iterator |
+| DeleteTimer | 0x517dd | — | Private, takes list iterator. Clears slot_flags[slot_index] at `TSM+0x34`, invokes scalar-deleting dtor at `vftable[1]` with flags=1, then calls `std::list::erase` (FUN_1013205b at `0x13205b` → renamed `std_list_TimerBarPtr_erase`) which unlinks prev/next, `operator_delete(node)`, and decrements size at `list+4` |
 | FindNextFreePos | 0x51779 | — | Scans slot_flags for first free slot |
 | GetTimer | 0x517a5 | — | Walks list matching Identity_t |
 | StartTimerBar | 0x51a27 | B8 imm32 (SEH) | Entry point from game events |
-| StopTimerbarMessage | 0x518b0 | — | Calls DeleteTimer for matching bars |
+| StopTimerbarMessage | 0x518b0 | — | `void __thiscall(this, Identity_t)` — Identity_t passed by value, flattens to `(int type, int instance)` on the stack. `instance == -1` wildcards. Calls DeleteTimer for every matching bar. Confirmed 2026-04-19 |
 
 ### TimerBarBase_c (0x1C bytes) — base class for a single timer bar
 
 | Field | Offset | Type | Notes |
 |-------|--------|------|-------|
-| vftable | +0x00 | ptr | Virtual dtor at [1] |
+| vftable | +0x00 | ptr | **Scalar-deleting destructor at vftable[1]** (not [0]; index 0 is a SignalTarget_c-inherited virtual). Call with `flags=1` to run dtor and then `operator delete`. Confirmed via TSM::DeleteTimer decompilation |
 | render_window | +0x04 | `RenderWindow_t*` | Visual container sprite |
 | power_bar | +0x08 | `PowerBar_t*` | Progress bar widget |
 | text_line | +0x0C | `TextLine_t*` | Label text (null if unnamed) |
