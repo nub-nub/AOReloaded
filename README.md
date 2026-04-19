@@ -23,6 +23,14 @@ Replaces the stock mouse camera with modern MMO controls:
 - **RMB-drag align** — right-click drag snaps your character to face the camera direction.
 - **Mouse-run** — hold both mouse buttons to run forward with mouse steering. Keyboard forward (W) and mouse-run coexist cleanly.
 
+### Castbars+
+
+- The cast bar that is usually tiny and locked to the top left of the screen can now be relocated and resized.
+- The cast bar now shows the nano program name rather than just "Nano program". 
+- Cast bars exist in a descending stack frame. To move the frame, open F10 -> AOReloaded -> enable the preview bars. The block that appears can be dragged around. When finished, uncheck the preview bars checkbox. 
+
+**NB**: When placing the preview bars, the actual *start position* - i.e., where all bars will appear and stack downwards from - corresponds with the *top bar*. This is some deep clientside behaviour that may be improved upon in a later release. For now, the bars all move together in a stack.
+
 ### Autorun+
 
 - Press autorun key once to start running, press it again to stop.
@@ -52,8 +60,6 @@ Non-exhaustive list, in no particular order:
 - Finer-grained mouse sensitivity sliders
 - Chat timestamps
 - Inventory and nanoprograms search and filtering
-- Auto-loot
-- Cast bar with nano name
 - Killcounter/session stats (XP/hr, etc)
 - Network latency display
 - Realtime clock on UI / Session playtime timer
