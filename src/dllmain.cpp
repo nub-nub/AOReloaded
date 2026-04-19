@@ -73,42 +73,37 @@ DWORD WINAPI DeferredInit(LPVOID /*param*/) {
     // Must happen before the game parses Root.xml (during world load).
     aor::PatchOptionsXml();
 
-    // Wait for game world.
+    // Wait for game world. 
     aor::Log("[init] waiting for game world...");
-    for (int i = 0; i < 600; ++i) {
-        if (aor::GameAPI::Exists("camera_mode")) break;
+    while (!aor::GameAPI::Exists("camera_mode")) {
         Sleep(100);
     }
 
-    if (aor::GameAPI::Exists("camera_mode")) {
-        aor::Log("[init] game world detected!");
+    aor::Log("[init] game world detected!");
 
-        // Install the SetDValue hook for settings persistence. Done here
-        // (after game world init) to avoid intercepting the hundreds of
-        // SetDValue calls the game makes during its own startup.
-        aor::SettingsInstallHook();
+    // Install the SetDValue hook for settings persistence. Done here
+    // (after game world init) to avoid intercepting the hundreds of
+    // SetDValue calls the game makes during its own startup.
+    aor::SettingsInstallHook();
 
-        // Install input handler hooks (GUI.dll callbacks + movement filter).
-        if (!aor::InitInputHandler()) {
-            aor::Log("[init] input handler failed — running without input mod");
-        }
+    // Install input handler hooks (GUI.dll callbacks + movement filter).
+    if (!aor::InitInputHandler()) {
+        aor::Log("[init] input handler failed — running without input mod");
+    }
 
-        // Install camera hooks (N3.dll CalcSteering). Depends on input handler.
-        if (!aor::InitCameraHooks()) {
-            aor::Log("[init] camera hooks failed — running without camera mod");
-        }
+    // Install camera hooks (N3.dll CalcSteering). Depends on input handler.
+    if (!aor::InitCameraHooks()) {
+        aor::Log("[init] camera hooks failed — running without camera mod");
+    }
 
-        // Install numpad text input fix (GUI.dll CheckInput hook).
-        if (!aor::InitNumpadFix()) {
-            aor::Log("[init] numpad fix failed — numpad keys won't type in chat");
-        }
+    // Install numpad text input fix (GUI.dll CheckInput hook).
+    if (!aor::InitNumpadFix()) {
+        aor::Log("[init] numpad fix failed — numpad keys won't type in chat");
+    }
 
-        // Install timer bar drag (GUI.dll CreateTimer hook + mouse filter).
-        if (!aor::InitTimerBarDrag()) {
-            aor::Log("[init] timer bar drag failed — bars not draggable");
-        }
-    } else {
-        aor::Log("[init] timed out waiting for game world");
+    // Install timer bar drag (GUI.dll CreateTimer hook + mouse filter).
+    if (!aor::InitTimerBarDrag()) {
+        aor::Log("[init] timer bar drag failed — bars not draggable");
     }
 
     aor::Log("[init] AOReloaded ready");
