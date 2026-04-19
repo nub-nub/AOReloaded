@@ -493,6 +493,16 @@ struct BarHitInfo {
 // Reads the ACTUAL position from each bar's RenderWindow_t (+0x2c/+0x30)
 // rather than computing from the formula, because bars may have been
 // created through paths we don't hook.
+//
+// The bar's visual size is base_size × scale, NOT the raw base size.
+// RenderWindow_t stores the tile-grid base at +0x34/+0x38 and the scale
+// factors at +0x3c/+0x40 — RenderSprite_t::Resize multiplies them to
+// produce the GPU quad size (confirmed by decompiling RenderWindow_t::
+// Resize and SetScale).  When ScaleBar applies a non-unit scale, the base
+// stays at the stock 128x16 and only the scale changes; hit-testing
+// against the base alone produces a tiny rect in the top-left of a
+// visually-larger bar.  Multiply through to the true visual size.
+//
 // On hit, fills *outHit with the bar's actual position and slot.
 static bool HitTestTimerBars(float px, float py, BarHitInfo* outHit) {
     void* tsm = GetTSM();
@@ -520,10 +530,20 @@ static bool HitTestTimerBars(float px, float py, BarHitInfo* outHit) {
                     reinterpret_cast<uintptr_t>(rw) + 0x2c);
                 int by = *reinterpret_cast<int*>(
                     reinterpret_cast<uintptr_t>(rw) + 0x30);
-                int bw = *reinterpret_cast<int*>(
+                int baseW = *reinterpret_cast<int*>(
                     reinterpret_cast<uintptr_t>(rw) + 0x34);
-                int bh = *reinterpret_cast<int*>(
+                int baseH = *reinterpret_cast<int*>(
                     reinterpret_cast<uintptr_t>(rw) + 0x38);
+                float sx = *reinterpret_cast<float*>(
+                    reinterpret_cast<uintptr_t>(rw) + 0x3c);
+                float sy = *reinterpret_cast<float*>(
+                    reinterpret_cast<uintptr_t>(rw) + 0x40);
+                // Guard against an un-initialised / zero scale — treat
+                // as identity so unscaled bars still hit-test correctly.
+                if (!(sx > 0.0f)) sx = 1.0f;
+                if (!(sy > 0.0f)) sy = 1.0f;
+                int bw = static_cast<int>(baseW * sx);
+                int bh = static_cast<int>(baseH * sy);
 
                 if (px >= bx && px < bx + bw &&
                     py >= by && py < by + bh) {
