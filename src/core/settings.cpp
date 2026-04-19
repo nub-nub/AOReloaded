@@ -359,7 +359,7 @@ static const char kAorXmlBlock[] =
     "        <OptionSlider label=\"Height (default: 10):\""
     " layout_borders=\"Rect(10,0,0,3)\" opt_type=\"variant\" opt_variable=\"AOR_TBarH\""
     " value_fmt=\"&lt;font color=#70C4D0&gt;%.0f&lt;/font&gt;\" value_scale=\"1\"/>\n"
-    "        <OptionCheckBox label=\"Enable cast bar preview (stack extends downwards from the topmost bar)\""
+    "        <OptionCheckBox label=\"Enable cast bar preview & drag (stack extends downwards from the topmost bar)\""
     " layout_borders=\"Rect(10,5,0,0)\" opt_type=\"variant\" opt_variable=\"AOR_TBarPrev\"/>\n"
     "\n"
     "        <TextView value=\"Input\" layout_borders=\"Rect(0,10,0,3)\" />\n"
