@@ -29,15 +29,21 @@ namespace aor {
 
 // ── Constants ───────────────────────────────────────────────────────────
 
-// Stock default position: X = 40, Y = 40.  Default bar is 128×16 with a 20px
-// slot pitch — i.e. 4px of padding between stacked bars.  We preserve that
-// 4px padding and derive the runtime slot pitch from the current bar height
-// so tall bars don't overlap and short bars don't leave gaps.
-static constexpr int kDefaultX        = 0x28;   // 40
-static constexpr int kDefaultBarW     = 0x80;   // 128
-static constexpr int kDefaultBarH     = 0x10;   // 16
-static constexpr int kDefaultSlotPitch = 0x14;  // 20 — stock game value
-static constexpr int kSlotPadding     = kDefaultSlotPitch - kDefaultBarH;  // 4
+// Native fill-sprite dimensions for GFX 0x1a9, read from Sprite_t::
+// GetOriginalSize during TimerBarBase_c construction (confirmed
+// empirically: AOReloaded.log `ScaleBar: base=(113,10)`).  These are the
+// slider values at which no upscaling/downscaling occurs — pixel-perfect.
+// The initial IPoint(0x80, 0x10) in the ctor (128×16) is a transient
+// scratch value overwritten by the second Resize; ignore it.
+//
+// Stock game uses a 20-pixel slot pitch → 10-pixel gaps between visible
+// bars.  We prefer a tighter 4-pixel gap at every height; the runtime
+// pitch = g_barH + kSlotPadding, so gaps stay constant when the user
+// resizes (see RepositionBar).
+static constexpr int kDefaultX        = 40;
+static constexpr int kDefaultBarW     = 113;  // native fill-sprite width
+static constexpr int kDefaultBarH     = 10;   // native fill-sprite height
+static constexpr int kSlotPadding     = 4;    // visible gap between bars
 
 // GUI.dll RVAs.
 static constexpr uint32_t kCreateTimerRVA       = 0x518f0;   // TimerBar_c path (logout, camp)

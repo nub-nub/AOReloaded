@@ -274,12 +274,21 @@ Constructor at RVA `0x512ae` (SEH prologue).
 
 **TimerBar_c** (0x28 bytes) — extends TimerBarBase_c with 3 zero-init int fields at +0x1C, +0x20, +0x24.
 
-### Position formula (hardcoded in TimerBarBase_c ctor)
+### Position / size formula (TimerBarBase_c ctor)
 
 ```
 Position: IPoint(0x28, (slot + 2) * 0x14)  →  (40px, (slot+2) * 20px)
-Size:     IPoint(0x80, 0x10)                →  (128px, 16px)
 ```
+
+**Size is NOT 128×16.**  The ctor calls `RenderWindow_t::RenderWindow_t`
+with an `IPoint(0x80, 0x10)` (128×16) — but immediately afterwards it
+invokes a second `RenderWindow_t::Resize` using
+`Sprite_t::GetOriginalSize()` of the fill sprite (GFX `0x1a9`).  The real
+stored base at `RenderWindow+0x34/+0x38` is therefore the native
+fill-sprite texture dimensions.  Empirically these are **113×10**
+(AOReloaded logs `ScaleBar: base=(113,10)`); the first 128×16 is a
+discarded scratch value.  Anything that scales relative to "default"
+needs to use the actual stored base, not the scratch constants.
 
 ### Timer types (from StartTimerBar)
 

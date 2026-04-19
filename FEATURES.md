@@ -42,8 +42,8 @@ The action timer bars (nano casting, item equip/unequip, reload, attack cooldown
 
 **Config:** Options panel (F10) → **AOReloaded** tab → **Timer Bars**:
 - X/Y position sliders (default: 40, 40). Can also be set by dragging while preview mode is on.
-- Width slider (default: 128)
-- Height slider (default: 16)
+- Width slider (default: 113 — native fill-sprite width; pixel-perfect at this value)
+- Height slider (default: 10 — native fill-sprite height; pixel-perfect at this value)
 - "Show preview bars" checkbox — toggles the five dummy bars AND enables drag-to-reposition. Disabled by default.
 
 <!-- 

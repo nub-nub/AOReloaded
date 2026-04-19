@@ -50,8 +50,8 @@ static SettingDef g_settings[] = {
     { "AOR_NumpadFix", SettingType::Bool, 1,       1,       0,   1  },
     { "AOR_TBarX",     SettingType::Int,  40,      40,      0, 4096 },
     { "AOR_TBarY",     SettingType::Int,  40,      40,      0, 4096 },
-    { "AOR_TBarW",     SettingType::Int, 128,     128,     32, 1024 },
-    { "AOR_TBarH",     SettingType::Int,  16,      16,      8,  128 },
+    { "AOR_TBarW",     SettingType::Int, 113,     113,     32, 1024 },
+    { "AOR_TBarH",     SettingType::Int,  10,      10,      8,  128 },
     { "AOR_TBarPrev",  SettingType::Bool,  0,       0,      0,    1 },
 };
 
@@ -353,10 +353,10 @@ static const char kAorXmlBlock[] =
     "        <OptionSlider label=\"Y position:\""
     " layout_borders=\"Rect(10,0,0,3)\" opt_type=\"variant\" opt_variable=\"AOR_TBarY\""
     " value_fmt=\"&lt;font color=#70C4D0&gt;%.0f&lt;/font&gt;\" value_scale=\"1\"/>\n"
-    "        <OptionSlider label=\"Width (default: 128):\""
+    "        <OptionSlider label=\"Width (default: 113):\""
     " layout_borders=\"Rect(10,0,0,3)\" opt_type=\"variant\" opt_variable=\"AOR_TBarW\""
     " value_fmt=\"&lt;font color=#70C4D0&gt;%.0f&lt;/font&gt;\" value_scale=\"1\"/>\n"
-    "        <OptionSlider label=\"Height (default: 16):\""
+    "        <OptionSlider label=\"Height (default: 10):\""
     " layout_borders=\"Rect(10,0,0,3)\" opt_type=\"variant\" opt_variable=\"AOR_TBarH\""
     " value_fmt=\"&lt;font color=#70C4D0&gt;%.0f&lt;/font&gt;\" value_scale=\"1\"/>\n"
     "        <OptionCheckBox label=\"Enable cast bar preview (stack extends downwards from the topmost bar)\""
