@@ -21,6 +21,7 @@
 #include "hooks/camera_hook.h"
 #include "hooks/numpad_fix.h"
 #include "hooks/timer_bar_drag.h"
+#include "hooks/gfx_debugger_hook.h"
 
 #include <windows.h>
 
@@ -104,6 +105,11 @@ DWORD WINAPI DeferredInit(LPVOID /*param*/) {
     // Install timer bar drag (GUI.dll CreateTimer hook + mouse filter).
     if (!aor::InitTimerBarDrag()) {
         aor::Log("[init] timer bar drag failed — bars not draggable");
+    }
+
+    // Install Graphics debugger mode hook (randy31.dll m_nDebuggerMode).
+    if (!aor::InitDebuggerMode()) {
+        aor::Log("[init] Graphics debugger mode hook failed — debug visualizers unavailable");
     }
 
     aor::Log("[init] AOReloaded ready");
