@@ -53,7 +53,7 @@ static SettingDef g_settings[] = {
     { "AOR_TBarW",     SettingType::Int, 113,     113,     32, 1024 },
     { "AOR_TBarH",     SettingType::Int,  10,      10,      8,  128 },
     { "AOR_TBarPrev",  SettingType::Bool,  0,       0,      0,    1 },
-    { "AOR_GfxDebug", SettingType::Int,   0,       0,      0,    255 },
+    { "AOR_GfxDebug", SettingType::Int,   0,       0,      0,    32768 },
 };
 
 static constexpr int kSettingCount = sizeof(g_settings) / sizeof(g_settings[0]);
